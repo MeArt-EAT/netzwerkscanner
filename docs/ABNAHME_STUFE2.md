@@ -4,9 +4,14 @@ Abhaken auf dem eigenen PC, am besten im **Heimnetz**. Voraussetzung: Stufe 1 is
 der Ausgabe des Server-Fensters und der Logdatei `%LOCALAPPDATA%\Netzwerkscanner\data\logs\netscan.log`
 zurückmelden.
 
-**Vorher:** Stufe 2 liegt auf dem Zweig `stufe-2` (Tag `v2.0-stufe2-rc1`). Zum Ausprobieren im Projektordner
-`git status` (keine fremden Änderungen), dann `git checkout stufe-2` und `start.bat`. Zurück zu Stufe 1:
-`git checkout main`.
+**Vorher:** Stufe 2 liegt auf dem Zweig `stufe-2` im Arbeitsordner `.claude\worktrees\stufe-2` des Projekts.
+**Nicht** im Projektordner `git checkout stufe-2` ausführen: Dropbox markiert die Ordner als Cloud-Platzhalter,
+dann bricht Git beim Umschalten ab („cannot create directory at 'netscan'“). Stattdessen:
+1. Server von Stufe 1 schließen (Strg+C im Server-Fenster).
+2. Im Arbeitsordner `git status` aufrufen (keine fremden Änderungen).
+3. `.claude\worktrees\stufe-2\start.bat` per Doppelklick starten. Datenbank und Einstellungen sind dieselben;
+   Stufe 2 erweitert die Datenbank, Stufe 1 kommt mit der erweiterten Datenbank weiter zurecht.
+Zurück zu Stufe 1: Server schließen, `start.bat` im Projektordner starten.
 
 **Ausprobieren ohne Netz:** `start.bat /demo` – fünf Geräte werden überwacht, das Telnet-Gerät fällt regelmäßig
 aus, der Webdienst der NAS stoppt zeitweise. Es geht nichts ins echte Netz.
