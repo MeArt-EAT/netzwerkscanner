@@ -116,6 +116,13 @@ def test_rate_limiter_limits() -> None:
     assert time.monotonic() - t0 >= 0.45  # 25 Wartevorgänge à 20 ms
 
 
+def test_rate_limiter_large_request_does_not_hang() -> None:
+    rl = RateLimiter(200)  # Bucket-Größe 20
+    t0 = time.monotonic()
+    rl.acquire(64)  # früher Endlosschleife
+    assert time.monotonic() - t0 < 1.0
+
+
 def test_ctx_log_goes_to_bus_and_sink(make_ctx) -> None:  # type: ignore[no-untyped-def]
     ctx = make_ctx()
     stored: list[tuple] = []

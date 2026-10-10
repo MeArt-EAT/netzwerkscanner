@@ -61,6 +61,14 @@ class RateLimiter:
         self._cancel = cancel
 
     def acquire(self, n: float = 1.0) -> None:
+        """Wartet, bis n Vorgänge erlaubt sind. Größere n als die Bucket-Größe werden gestückelt."""
+        while n > self.capacity:
+            self._acquire(self.capacity)
+            n -= self.capacity
+        if n > 0:
+            self._acquire(n)
+
+    def _acquire(self, n: float) -> None:
         while True:
             with self._lock:
                 now = time.monotonic()
