@@ -189,11 +189,14 @@ def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float, inter: flo
         ether_fields["src"] = hwsrc
         arp_fields["hwsrc"] = hwsrc
     try:
+        # promisc=False: Viele Windows-WLAN-Treiber (z. B. Intel) nehmen im Promiscuous Mode keine an den eigenen
+        # Rechner gerichteten Antworten mehr an – dann kämen 0 Antworten zurück. Wir brauchen nur Antworten an uns.
         answered, _unanswered = srp(
             Ether(**ether_fields) / ARP(**arp_fields),
             iface=iface,
             timeout=timeout,
             inter=gap,
+            promisc=False,
             verbose=0,
         )
     except AssertionError:  # Programmierfehler bzw. Testsperre nicht als „nicht verfügbar“ tarnen

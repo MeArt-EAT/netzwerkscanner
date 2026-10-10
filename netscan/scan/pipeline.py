@@ -307,11 +307,29 @@ def _discover(ctx: ScanContext, job: ScanJob) -> list[Device]:
     for ip in pings:
         via.setdefault(ip, []).append("ping")
 
+    arp_found = len(macs)
     neighbors = services.platform.neighbor_table()
-    for ip in pings:
-        if ip not in macs and ip in neighbors:
-            macs[ip] = neighbors[ip]
-            via[ip].append("cache")
+    # Beim Ping-Durchlauf fragt das Betriebssystem selbst per ARP nach jeder Adresse. Geräte, die ARP beantworten,
+    # aber Ping verwerfen (z. B. iPhone, iPad, Mac im Ruhezustand), stehen danach im ARP-Cache – also alle Ziele
+    # übernehmen, nicht nur die Ping-Antworten. Gelesen wird nur der Cache, es wird nichts zusätzlich gesendet.
+    target_set = set(targets)
+    cache_only = 0
+    for ip in sorted(neighbors, key=_ip_key):
+        if ip in macs or ip not in target_set:
+            continue
+        macs[ip] = neighbors[ip]
+        entry = via.setdefault(ip, [])
+        entry.append("cache")
+        if "ping" not in entry:
+            cache_only += 1
+    if cache_only:
+        ctx.log(f"{cache_only} Gerät(e) nur über den ARP-Cache gefunden (antworten nicht auf Ping, z. B. Handys im Ruhezustand).")
+    if available and targets and arp_found == 0 and len(macs) >= 2:
+        ctx.log(
+            "Der ARP-Scan bekam keine einzige Antwort, Ping und ARP-Cache fanden aber Geräte. Vermutlich nimmt der "
+            "Netzwerktreiber die Antworten nicht an. Ergebnis stammt aus Ping und ARP-Cache.",
+            "warning",
+        )
 
     gateway_ip = services.platform.default_gateway(adapter.name)
     if gateway_ip and gateway_ip not in macs and gateway_ip in neighbors and _in_network(gateway_ip, adapter.network):

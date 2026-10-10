@@ -359,6 +359,8 @@ def test_scapy_sender_sends_broadcast_arp_through_found_interface(monkeypatch) -
     assert call["timeout"] == 1.5
     assert call["verbose"] == 0
     assert call["inter"] == 0.0
+    # Promiscuous Mode aus: Windows-WLAN-Treiber nehmen dort sonst keine Antworten an (0 von 253 im Heimnetz-Test)
+    assert call["promisc"] is False
     ether = call["packet"]
     # Absender ausdrücklich aus dem Adapter, nicht aus Scapys zwischengespeicherter Routentabelle (Befund WIN-06)
     assert isinstance(ether, _Ether) and ether.fields == {"dst": "ff:ff:ff:ff:ff:ff", "src": "00:1b:21:00:00:20"}
