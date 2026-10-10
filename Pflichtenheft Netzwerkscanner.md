@@ -140,6 +140,8 @@ Stufe 3 bewertet das Risiko jedes Geräts und liest verwaltete Netzwerkgeräte p
 1. **Betriebssystem-Schätzung:** aus TTL, offenen Ports und Dienst-Kennungen. Ergebnis als Schätzung gekennzeichnet: Windows, Linux, Netzwerkgerät, Drucker oder IoT.
 2. **SSL/TLS-Prüfung:** Zertifikat mit Aussteller, Ablaufdatum und Selbstsignatur, dazu die TLS-Version. Warnung 30 Tage vor Ablauf.
 3. **Risiko-Dashboard:** Bewertung je Gerät aus offenen Ports, Diensten wie Telnet, SMB oder Anmeldung über unverschlüsseltes HTTP, und Zertifikaten. Übersicht nach Risikostufe mit Abhilfehinweis.
+   - **Warnung vor Klartext-Anmeldung** (ergänzt 10.10.2026): Der Scanner markiert jeden Dienst, bei dem Zugangsdaten unverschlüsselt übertragen würden, und warnt davor, dort ein Passwort einzugeben. Ziel: In einem freien oder fremden Netz kein eigenes Passwort im Klartext preisgeben. Erkannt werden Anmeldeseiten über HTTP (Seite mit Passwortfeld, HTTP-Basic-Auth), FTP (21), Telnet (23) und Mail-Dienste ohne Verschlüsselung (POP3 110, IMAP 143, SMTP 25/587 ohne STARTTLS). Die Warnung nennt Gerät, Dienst und Adresse und schlägt die verschlüsselte Alternative vor (HTTPS, SFTP/SSH, Mail mit TLS). In einem nicht als Heimnetz bekannten Netz zeigt die Oberfläche zusätzlich einen Hinweis, dass in offenen WLANs Mitlesen möglich ist. Die Grundlage aus Stufe 1 (Risikotabelle der Ports) bleibt; hier kommt die gezielte Prüfung der Anmeldeseiten und eine eigene Übersicht dazu.
+   - **Grenze:** Der Scanner liest dafür nur öffentlich erreichbare Dienste passiv aus (Banner, Anmeldeseite, angebotene Verschlüsselung). Er fängt keinen fremden Datenverkehr ab, schneidet nichts mit und zeigt keine tatsächlich übertragenen Passwörter an. Das entspricht Grundsatz 5 (keine Angriffe); Verkehrsauswertung gibt es nur in Stufe 4 und dort nur als DNS-Treffer.
 4. **Sicherheits-Reiter:** jeder Befund mit Details und Begründung.
 5. **SNMP-Erkennung:** Bei Switches, Servern und NAS prüft der Scanner ohne Zugangsdaten über die SNMPv3-Erkennungsanfrage, ob SNMP antwortet. Zugangsdaten rät er nie.
 6. **SNMP-Zugang:** Ein SNMPv3-Leseprofil wird einmal im Scanner eingetragen und auf den Geräten als gleicher Benutzer angelegt. Der Scanner probiert es automatisch bei jedem Gerät, das SNMPv3 meldet. SNMPv2c gibt es nur gezielt pro Gerät, weil es den Zugangsnamen im Klartext sendet. Abweichende Zugänge pro Gerät sind möglich.
@@ -168,6 +170,8 @@ Stufe 3 bewertet das Risiko jedes Geräts und liest verwaltete Netzwerkgeräte p
 ### Abnahme
 
 - [ ] Ein Gerät mit offenem Telnet- oder SMB-Port erscheint im Risiko-Dashboard mit Stufe „hoch“ und einem Abhilfehinweis.
+- [ ] Ein Test-Dienst mit Anmeldeseite über HTTP (Passwortfeld) und ein FTP- oder Telnet-Dienst erscheinen als „Klartext-Anmeldung“ mit Warnung und verschlüsselter Alternative. Eine Anmeldeseite über HTTPS wird nicht gewarnt.
+- [ ] Der Scanner zeigt dabei nie ein tatsächlich übertragenes Passwort an und schneidet keinen Datenverkehr mit.
 - [ ] Ein selbstsigniertes, abgelaufenes oder in weniger als 30 Tagen ablaufendes Zertifikat wird erkannt.
 - [ ] Die NAS mit eingeschaltetem SNMP liefert über das Leseprofil oder die gezielte v2c-Freigabe Systemstatus, Temperatur, Platten- und RAID-Zustand.
 - [ ] Ein simulierter Plattenfehler oder ein RAID-Zustand ungleich „normal“ löst einen Alert aus.
