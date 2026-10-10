@@ -122,6 +122,10 @@ TARGET_LIMITS: dict[str, tuple[float, float]] = {
 MAX_TARGETS = 64
 MAX_CHECKS_PER_TARGET = 8
 DB_WARN_BYTES = 100 * 1024 * 1024  # ab dieser Dateigröße warnt die Oberfläche (Plattenhygiene)
+# Plattenbudget der Rohwerte (BAUPLAN §34): Passen 30 Tage bei den gewählten Einstellungen nicht hinein, wird früher
+# zu Stundenmitteln verdichtet (mindestens 1 Tag Rohwerte bleibt). 40 Byte je Rohwert inkl. Index, gemessen ~25–35.
+RAW_BUDGET_BYTES = 250 * 1024 * 1024
+RAW_BYTES_PER_SAMPLE = 40
 
 _FIELD_NAMES = {f.name for f in fields(Settings)}
 

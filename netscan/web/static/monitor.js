@@ -330,13 +330,20 @@
     return { state: state, label: MONITOR_STATE_LABELS[state] || "unbekannt", tone: tone, reason: reason };
   }
 
-  /** „Jetzt prüfen“: nur, wenn der Monitor läuft, eingeschaltet ist und Ziele hat. */
-  function runButtonState(status, targetCount) {
+  /** „Jetzt prüfen“: nur, wenn der Monitor läuft, eingeschaltet ist und eingeschaltete Ziele hat.
+   *  targets: Liste der Ziele (TargetView; enabled false zählt nicht) oder nur deren Anzahl. Mit einer Anzahl
+   *  entscheidet der Zustand idle (= keine eingeschalteten Ziele beim letzten Durchlauf). Mit einer Liste gilt die
+   *  Liste: Sie wird bei jeder Änderung der Ziele neu geladen, der Zustand erst nach dem nächsten Durchlauf. */
+  function runButtonState(status, targets) {
     const info = monitorStateInfo(status);
     if (!info.state) return { disabled: true, title: "Der Zustand der Überwachung ist noch nicht bekannt." };
     if (info.state === "stopped") return { disabled: true, title: "Der Monitor läuft nicht." };
     if (info.state === "off") return { disabled: true, title: "Die Überwachung ist in den Einstellungen ausgeschaltet." };
-    if (!(num(targetCount) > 0)) return { disabled: true, title: "Noch kein Gerät zur Überwachung ausgewählt." };
+    const list = Array.isArray(targets) ? targets.filter((t) => t && typeof t === "object") : null;
+    const total = list ? list.length : num(targets);
+    if (!(total > 0)) return { disabled: true, title: "Noch kein Gerät zur Überwachung ausgewählt." };
+    const active = list ? list.filter((t) => t.enabled !== false).length : info.state === "idle" ? 0 : total;
+    if (!(active > 0)) return { disabled: true, title: "Alle überwachten Geräte sind abgeschaltet." };
     return { disabled: false, title: "Alle überwachten Geräte sofort prüfen (der Netz-Wächter gilt auch hier)." };
   }
 
@@ -373,10 +380,17 @@
     });
   }
 
-  /** Datensätze für den Antwortzeit-Verlauf. Eimer mit n = 0 (oder ohne Antwortzeit) werden null ⇒ sichtbare Lücke. */
-  function seriesData(points) {
+  /** Datensätze für den Antwortzeit-Verlauf. Eimer mit n = 0 (oder ohne Antwortzeit) werden null ⇒ sichtbare Lücke.
+   *  frame (optional, die Antwort der API): {since, until, bucket_s}. Damit zählen der angefangene erste Eimer
+   *  (beginnt vor since) und der laufende letzte Eimer (reicht über until) ohne Messwerte nicht als Lücke. */
+  function seriesData(points, frame) {
     const out = { avg: [], min: [], max: [], down: [], radius: [], info: [], samples: 0, gaps: 0, downs: 0 };
     if (!Array.isArray(points)) return out;
+    const f = frame && typeof frame === "object" ? frame : {};
+    const sinceMs = toMs(f.since);
+    const untilMs = toMs(f.until);
+    const bucketS = num(f.bucket_s);
+    const bucketMs = bucketS !== null && bucketS > 0 ? bucketS * 1000 : null;
     const rows = [];
     for (const p of points) {
       if (!p || typeof p !== "object") continue;
@@ -401,13 +415,17 @@
         if (lo > hi) [lo, hi] = [hi, lo];
       }
       const isDown = r.n > 0 && r.up !== null && r.up < 100;
+      // Randeimer nur teilweise im Zeitraum: "start" beginnt vor since, "end" läuft noch (reicht über until)
+      const startsEarly = sinceMs !== null && r.t < sinceMs;
+      const stillRunning = untilMs !== null && bucketMs !== null && r.t + bucketMs > untilMs;
+      const edge = startsEarly ? "start" : stillRunning ? "end" : "";
       out.avg.push({ x: r.t, y: r.avg });
       out.min.push({ x: r.t, y: lo });
       out.max.push({ x: r.t, y: hi });
       out.down.push({ x: r.t, y: isDown ? 0 : null });
-      out.info.push({ t: r.t, n: r.n, up_pct: r.up, rtt_avg: r.avg, rtt_min: lo, rtt_max: hi });
+      out.info.push({ t: r.t, n: r.n, up_pct: r.up, rtt_avg: r.avg, rtt_min: lo, rtt_max: hi, edge: edge });
       out.samples += r.n;
-      if (r.n === 0) out.gaps += 1;
+      if (r.n === 0 && !edge) out.gaps += 1;
       if (isDown) out.downs += 1;
     }
     // Einzelne Werte zwischen zwei Lücken als Punkt zeigen (eine Linie braucht zwei Punkte)
@@ -423,6 +441,8 @@
   /** Zeilen des Tooltips für einen Eimer des Antwortzeit-Verlaufs. */
   function seriesTooltip(info) {
     if (!info || typeof info !== "object") return [];
+    if (!info.n && info.edge === "end") return ["Noch keine Messwerte (Abschnitt läuft noch)"];
+    if (!info.n && info.edge === "start") return ["Keine Messwerte (Abschnitt liegt nur teilweise im Zeitraum)"];
     if (!info.n) return ["Keine Messwerte (Lücke)"];
     const lines = [];
     if (info.rtt_avg === null || info.rtt_avg === undefined) lines.push("Keine Antwortzeit (nicht erreichbar)");
@@ -1172,7 +1192,7 @@
     note.textContent = "";
     if (M.seriesError) return drawChart("rtt", "chart-rtt", null, M.seriesError);
     if (!M.series) return drawChart("rtt", "chart-rtt", null, "Verlauf wird geladen …");
-    const sd = seriesData(M.series.points);
+    const sd = seriesData(M.series.points, M.series);
     if (!sd.samples) return drawChart("rtt", "chart-rtt", null, "Noch keine Messwerte in diesem Zeitraum.");
     note.textContent = seriesNote(M.series.bucket_s, sd);
     const range = typeof M.series.range === "string" ? M.series.range : M.range;
@@ -1365,7 +1385,7 @@
     if (every && info.state !== "off" && info.state !== "stopped") times.push(`alle ${every}`);
     if (times.length) box.append(h("span", { class: "muted mon-times", text: times.join(" · "), title: s.last_cycle ? App.formatTime(s.last_cycle) : "" }));
     const btn = $("btn-mon-run");
-    const run = runButtonState(M.status, M.targets.size);
+    const run = runButtonState(M.status, Array.from(M.targets.values()));
     btn.disabled = run.disabled || M.running;
     btn.title = M.running ? "Wird gestartet …" : run.title;
   }

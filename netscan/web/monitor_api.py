@@ -14,6 +14,7 @@ Middleware in server.py für alle schreibenden Endpunkte.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
 from typing import Annotated, Any
@@ -34,6 +35,10 @@ log = logging.getLogger(__name__)
 
 RANGE_SECONDS: dict[str, int] = {"24h": 86400, "7d": 604800, "30d": 2592000, "1y": 31536000}
 SERIES_MAX_POINTS = 400
+# Ein Eimer des Verlaufs muss länger sein als das Prüfintervall: Die Abstände der Messungen liegen knapp darüber
+# (Weckverzug, auf ganze Sekunden abgeschnitten). Bei Eimer = Intervall rutscht sonst ab und zu eine Messung in den
+# übernächsten Eimer, und einer bleibt leer (falsche Lücke).
+SERIES_INTERVAL_SLACK = 1.1
 ALERT_STATES: tuple[str, ...] = ("active", "unacked", "all")
 ALERT_LIMIT = (1, 1000)
 TREND_DAYS = (1, 365)
@@ -226,6 +231,31 @@ def _series_target(svc: Services, mac: str, check_id: int) -> MonitorTarget:
     return target
 
 
+def _monitor_interval_s(svc: Services) -> int:
+    """Prüfintervall aus den Einstellungen, in den Grenzen aus config. Lesefehler oder Unsinn ⇒ Standard."""
+    default = config.Settings().monitor_interval_s
+    try:
+        raw = svc.settings.load().monitor_interval_s
+    except Exception:  # noqa: BLE001 – der Verlauf lebt auch ohne Einstellungen
+        log.warning("Prüfintervall nicht lesbar, nehme %d s", default, exc_info=True)
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+        return default
+    lo, hi = config.SETTING_LIMITS["monitor_interval_s"]
+    return math.ceil(min(max(raw, lo), hi))
+
+
+def _series_max_points(seconds: int, interval_s: int) -> int:
+    """Höchstzahl der Eimer, sodass jeder Eimer länger ist als das Prüfintervall (höchstens SERIES_MAX_POINTS).
+
+    metrics.series wählt die kleinste runde Eimergröße ≥ ceil(seconds / max_points); mit
+    max_points ≤ seconds / min_bucket ist das mindestens min_bucket. Sonst bleibt bei einem Intervall über der
+    Eimergröße jeder zweite Eimer leer, und die Oberfläche meldet Lücken, obwohl lückenlos gemessen wurde.
+    """
+    min_bucket = math.ceil(interval_s * SERIES_INTERVAL_SLACK)
+    return max(1, min(SERIES_MAX_POINTS, seconds // min_bucket))
+
+
 def _empty_availability() -> dict[str, Any]:
     return {"up_pct": None, "samples": 0, "up": 0}
 
@@ -400,13 +430,15 @@ def get_series(
     check_id: int = 0,
     range_: Annotated[str, Query(alias="range")] = "24h",
 ) -> dict[str, Any]:
+    """Antwortzeit-Verlauf; ein Eimer ist immer länger als das Prüfintervall (keine falschen Lücken)."""
     seconds = RANGE_SECONDS.get(range_)
     if seconds is None:
         raise HTTPException(400, f"Unbekannter Zeitraum „{range_[:20]}“ (erlaubt: {', '.join(RANGE_SECONDS)}).")
     target = _series_target(svc, mac, check_id)
     until = int(_now())
     since = until - seconds
-    result = svc.metrics.series(target.id, check_id, since=since, until=until, max_points=SERIES_MAX_POINTS)
+    max_points = _series_max_points(seconds, _monitor_interval_s(svc))
+    result = svc.metrics.series(target.id, check_id, since=since, until=until, max_points=max_points)
     return {
         "range": range_,
         "since": since,

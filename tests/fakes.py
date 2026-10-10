@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field
 
 from netscan.core.models import Adapter, PingResult, normalize_mac
@@ -188,6 +190,19 @@ class FakeChecks:
         self.reach_calls: list[tuple[str, str, list[int], str | None]] = []
         self.service_calls: list[tuple[str, str, int, str | None]] = []
         self.raise_gone: set[str] = set()  # IPs, bei denen die Absenderadresse fehlt
+        # Wettlauf- und Abbruch-Tests: gesetzte Schranke hält jede Prüfung an (höchstens 10 s), bis sie offen ist
+        self.gate: threading.Event | None = None
+        self.started = threading.Event()  # mindestens eine Prüfung hat begonnen
+        self.reach_delay_s = 0.0  # künstliche Dauer je Erreichbarkeitstest
+        self.service_delay_s = 0.0  # künstliche Dauer je Dienstprüfung
+
+    def _hold(self, delay_s: float) -> None:
+        self.started.set()
+        gate = self.gate
+        if gate is not None:
+            gate.wait(10)
+        if delay_s:
+            time.sleep(delay_s)
 
     def online(self, ip: str, rtt_ms: float = 2.0) -> None:
         self.reach[ip] = self._CheckResult(ok=True, rtt_ms=rtt_ms, detail="Ping-Antwort", method="ping")
@@ -206,12 +221,14 @@ class FakeChecks:
         from netscan.net.ports import SourceAddressGone
 
         self.reach_calls.append((ip, method, list(tcp_ports), source_ip))
+        self._hold(self.reach_delay_s)
         if ip in self.raise_gone:
             raise SourceAddressGone(f"{source_ip} fehlt")
         return self.reach.get(ip) or self._CheckResult(ok=False, detail="keine Antwort", method="ping")
 
     def run_check(self, kind, ip, port, timeout_s, *, path="/", source_ip=None):  # type: ignore[no-untyped-def]
         self.service_calls.append((ip, kind, port, source_ip))
+        self._hold(self.service_delay_s)
         return self.service.get((ip, kind, port)) or self._CheckResult(ok=False, detail="Port geschlossen", method=f"{kind}:{port}")
 
     @staticmethod
@@ -237,6 +254,8 @@ class RecordingMetrics:
         self.samples: list = []
         self.deleted: list[tuple[int, int | None]] = []
         self.compacted: list[int] = []
+        self.keep_days: list[int] = []
+        self.rows_per_day = 0  # für das Plattenbudget (raw_rows_since)
         self.pruned: list[set] = []
 
     def record(self, samples) -> None:  # type: ignore[no-untyped-def]
@@ -248,7 +267,11 @@ class RecordingMetrics:
 
     def compact(self, now: int, keep_days: int = 30) -> int:
         self.compacted.append(now)
+        self.keep_days.append(keep_days)
         return 0
+
+    def raw_rows_since(self, since: int) -> int:
+        return self.rows_per_day
 
     def prune_orphans(self, valid) -> int:  # type: ignore[no-untyped-def]
         self.pruned.append(set(valid))

@@ -425,6 +425,7 @@ class MonitorStatus:
     paused: int = 0
     unknown: int = 0
     db_size_bytes: int | None = None
+    raw_keep_days: int = 30  # Tage Rohwerte; weniger als 30 nur, wenn das Plattenbudget sonst nicht reicht
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

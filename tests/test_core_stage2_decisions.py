@@ -82,3 +82,31 @@ def test_own_pc_never_raises_new_device(services) -> None:  # type: ignore[no-un
     other = Device(mac="da:a1:19:aa:bb:07", ip="192.168.178.7")
     engine.on_scan(ScanOutcome(scan_id=2, kind="scan", adapter=make_adapter(), new_devices=[me, other]))
     assert [a.mac for a in engine.store.list(state="all")] == ["da:a1:19:aa:bb:07"]
+
+
+@pytest.mark.parametrize(
+    ("rows_per_day", "expected"),
+    [(0, 30), (43_200, 30), (500_000, 13), (4_976_640, 1), (10**9, 1)],
+)
+def test_raw_budget_shortens_raw_retention_only_when_needed(services, rows_per_day, expected) -> None:  # type: ignore[no-untyped-def]
+    # 43.200/Tag = 30 Messreihen im 60-s-Takt (Normalfall); 4.976.640/Tag = 64 Ziele × 9 Reihen im 10-s-Takt
+    from tests.fakes import RecordingAlertStore, RecordingMetrics
+
+    services.metrics, services.alerts = RecordingMetrics(), RecordingAlertStore()
+    services.metrics.rows_per_day = rows_per_day
+    services.monitor.run_cycle(now=1_760_000_000)
+    assert services.metrics.keep_days == [expected]
+    assert services.monitor.status().raw_keep_days == expected
+
+
+def test_raw_rows_since_counts_real_samples(tmp_path: Path) -> None:
+    from netscan.core.metrics import MetricsStore
+    from netscan.core.models import Sample
+
+    db = Database(tmp_path / "r.sqlite3")
+    try:
+        store = MetricsStore(db)
+        store.record([Sample(1, 0, 1000 + i, True, 1.0) for i in range(50)])
+        assert store.raw_rows_since(1000) == 50 and store.raw_rows_since(1040) == 10
+    finally:
+        db.close()

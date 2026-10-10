@@ -1,9 +1,23 @@
-# Übergabe an den nächsten Chat – Stand 10.10.2026, 18:10 Uhr
+# Übergabe an den nächsten Chat – Stand 10.10.2026, 22:15 Uhr
 
 Diese Datei, das [Pflichtenheft](../Pflichtenheft%20Netzwerkscanner.md) und der [Bauplan](BAUPLAN.md) reichen
 als Einstieg. Den alten Chatverlauf braucht es nicht.
 
-## 1. Stand
+## 0. Stufe 2 (Überwachung) – gebaut, Abnahme offen
+
+- **Zweig `stufe-2`, Tag `v2.0-stufe2-rc1`.** Gebaut im Git-Arbeitsordner `.claude/worktrees/stufe-2`, damit der
+  Projektordner für die Abnahme von Stufe 1 auf `main` bleibt. Nach der Abnahme von Stufe 1 und 2: `stufe-2` in
+  `main` zusammenführen.
+- Vertrag: [BAUPLAN.md](BAUPLAN.md) Teil 2 (§18–34, inkl. Entscheidungen der Prüfrunde). Checkliste:
+  [ABNAHME_STUFE2.md](ABNAHME_STUFE2.md). Prognose und Istwerte: [PROGNOSE.md](PROGNOSE.md).
+- Prüfrunde: 25 Befunde, 12 bestätigt (je 2 Gegenprüfer), zu 8 zusammengeführt, alle behoben (B6 Plattenbudget
+  durch die Leitung).
+- Bewusst offen (BAUPLAN §34): geschlossener Port unter Windows erst nach ~2 s (erscheint als „keine Antwort“),
+  Ping des Monitors ohne Bindung an die Absenderadresse, Autostart nie echt aufgerufen (Abnahme durch den Nutzer).
+- Für Stufe 3 vorgemerkt: Firewall-Auswertung beim eigenen PC, echte TLS-Prüfung (Port 8883), Warnung vor
+  Klartext-Anmeldung, `window.NetscanApp` als Schnittstelle für neue Reiter, ggf. SIO_TCP_INITIAL_RTO.
+
+## 1. Stand Stufe 1
 
 - **Stufe 1 ist fertig** als Tag `v1.0-stufe1-rc3`, Branch `main`.
   - 997 Tests grün, 1 übersprungen.

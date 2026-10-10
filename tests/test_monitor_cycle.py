@@ -5,6 +5,7 @@ Netz gibt es hier nicht: Erreichbarkeit und Dienste liefert FakeChecks, die Plat
 
 from __future__ import annotations
 
+import threading
 import time
 from types import SimpleNamespace
 
@@ -77,6 +78,7 @@ def test_online_target_records_sample_and_learns_router(env) -> None:  # type: i
     target = env.monitor.add_target(NAS_MAC)
     assert target.gateway_mac is None
     env.checks.online(NAS_IP, rtt_ms=4.0)
+    env.platform.neighbors[NAS_IP] = NAS_MAC  # Wiedererkennung bestätigt ⇒ Router wird gelernt
     status = env.monitor.run_cycle()
     assert status.state == "running" and status.online == 1 and status.targets == 1
     stored = env.svc.targets.get(NAS_MAC)
@@ -151,6 +153,7 @@ def test_guard_error_counts_as_block(env, monkeypatch) -> None:  # type: ignore[
 def test_other_router_pauses_and_scan_takes_target_over(env) -> None:  # type: ignore[no-untyped-def]
     env.monitor.add_target(NAS_MAC)
     env.checks.online(NAS_IP)
+    env.platform.neighbors[NAS_IP] = NAS_MAC
     env.monitor.run_cycle()
     assert env.svc.targets.get(NAS_MAC).gateway_mac == HOME_GW_MAC
     other = "aa:bb:cc:00:00:99"
@@ -414,11 +417,18 @@ def test_stop_interrupts_slow_checks(env, monkeypatch) -> None:  # type: ignore[
     from netscan.net import checks
 
     monkeypatch.setattr(checks, "check_reachability", slow)
+    before = set(threading.enumerate())
     env.monitor.start()
     time.sleep(0.5)
     t0 = time.monotonic()
     env.monitor.stop()
     assert time.monotonic() - t0 < 5
+    # Auch die Arbeiter enden bald: nach der laufenden Prüfung (1,5 s) beginnt keine weitere
+    probes = [t for t in threading.enumerate() if t.name.startswith("monitor-probe") and t not in before]
+    for t in probes:
+        t.join(max(0.0, t0 + 2.5 - time.monotonic()))
+    assert not any(t.is_alive() for t in probes)
+    assert all(t.daemon for t in probes)  # hält das Programmende nie auf
 
 
 def test_services_build_monitor_and_listeners(services) -> None:  # type: ignore[no-untyped-def]

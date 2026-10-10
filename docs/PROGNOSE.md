@@ -51,12 +51,12 @@ Stand beim Start: 5-h-Fenster 1 %, Woche 7 %.
 
 | Phase | Wer | Prognose Dauer | Ist Dauer | Ist Kontingent (5-h-Fenster / Woche) |
 |---|---|---|---|---|
-| 1 Bauplan Stufe 2, Kern (Datenbank v2, Monitor, Ereignisse, Attrappen, Sim-Labor) | Leitung (Opus) | 30–45 min | | |
-| 2 Module bauen, 6 Agenten parallel | 4 Ingenieure (Opus), 2 Zeichner (Sonnet) | 40–60 min | | |
-| 3 Zusammenbau, Ende-zu-Ende-Test, Demo im Browser | Leitung | 25–40 min | | |
-| 4 Prüfung (4 Schwerpunkte, je Befund 2 Gegenprüfer, Nachbesserung) | Ingenieure | 70–110 min | | |
-| 5 README, Checkliste, Istwerte, Tag `v2.0-stufe2-rc1` | Zeichner und Leitung | 15–20 min | | |
-| **Summe** | | **3–4½ h** | | |
+| 1 Bauplan Stufe 2, Kern (Datenbank v2, Monitor, Ereignisse, Attrappen, Sim-Labor) | Leitung (Opus) | 30–45 min | 26 min (19:21–19:47) | 1 % → 2 % / 7 % → 7 % |
+| 2 Module bauen, 6 Agenten parallel (+ Demo danach) | 4 Ingenieure (Opus), 3 Zeichner (Sonnet) | 40–60 min | 54 min (19:49–20:43) | 2 % → 8 % / 7 % → 9 % |
+| 3 Zusammenbau, Ende-zu-Ende-Test, Demo im Browser | Leitung | 25–40 min | 12 min (20:43–20:55) | 8 % → 9 % / 9 % |
+| 4 Prüfung (4 Schwerpunkte, je Befund 2 Gegenprüfer, Nachbesserung) | Ingenieure | 70–110 min | 72 min (20:57–22:09) | 9 % → 22 % / 9 % → 12 % |
+| 5 README, Checkliste, Istwerte, Tag `v2.0-stufe2-rc1` | Leitung | 15–20 min | ≈ 10 min | 22 % / 12 % |
+| **Summe** | | **3–4½ h** | **≈ 2 h 55 min** | **≈ 21 % des Fensters, Woche +5 %** |
 
 - Umfang: 11.000–14.000 Zeilen, etwa die Hälfte Tests (Stufe 1: 21.000; Stufe 2 laut Pflichtenheft ~60 % davon).
 - Tokens: 5–7 Mio. verarbeitet (überwiegend Zwischenspeicher), davon 0,4–0,7 Mio. Output (Stufe 1: 4,0 Mio.).
@@ -64,3 +64,26 @@ Stand beim Start: 5-h-Fenster 1 %, Woche 7 %.
 - Plattenbudget beim Bau: Agent-Protokolle dieses Projekts höchstens 400 MB (Start: 27 MB), Prüfung nach jeder Phase.
 - Plattenbudget im Betrieb: 10 überwachte Geräte mit je 2 Diensten ≈ 30–60 MB Messwerte nach 30 Tagen, danach
   etwa 1 MB pro Monat (Stundenmittel). Anzeige der Dateigröße, Warnung ab 100 MB.
+
+## Istwerte Stufe 2 – Vergleich
+
+| | Prognose | Ist |
+|---|---|---|
+| Dauer | 3–4½ h | ≈ 2 h 55 min |
+| 5-h-Fenster | 20–30 % | ≈ 21 % |
+| Woche | +6–9 % | +5 % (7 % → 12 %) |
+| Agenten-Tokens | 5–7 Mio. | ≈ 9,9 Mio. (Bau 2,1 Mio. mit 7 Agenten, Prüfung 7,8 Mio. mit 62 Agenten) |
+| Umfang | 11.000–14.000 Zeilen | 16.650 Zeilen: Programm 5.130, Oberfläche 2.600, Tests 8.930 (+ Doku 590) |
+| Tests | – | 2.186 grün, 2 übersprungen (Stufe 1: 997) |
+| Prüfrunde | – | 25 Befunde, 12 bestätigt, zu 8 zusammengeführt, alle behoben |
+| Platte (Agent-Protokolle) | ≤ 400 MB | 79 MB |
+
+## Lehre für Stufe 3
+
+- Zeit: Bau und Zusammenbau wieder schneller als geplant; die Prüfrunde lag diesmal im Rahmen (72 min), weil
+  Gegenprüfung und Nachbesserung parallel liefen.
+- Tokens: Die Prüfrunde mit zwei Gegenprüfern je Befund kostet etwa viermal so viel wie der Bau. Für Stufe 3
+  Agenten-Tokens mit dem Faktor 1,5 auf die Schätzung ansetzen; das Wochenkontingent stieg trotzdem nur um 5 %.
+- Umfang: wieder über der Schätzung (Faktor ~1,2 auf die neue, schon erhöhte Schätzung); Tests gut die Hälfte.
+- Stufe 3 (Sicherheit und SNMP, laut Pflichtenheft 35 %): etwa 3–4 h, 25–35 % eines Fensters, Woche +6–8 %,
+  18.000–23.000 Zeilen.

@@ -698,3 +698,20 @@ Antworten auf die Vertragsfragen der Agenten; sie gelten als Teil des Vertrags.
   - Der Ping des Monitors bindet nicht an die Absenderadresse (`Platform.ping` hat keinen Parameter dafür, wie in
     Stufe 1). Der Wächter prüft unmittelbar vorher; ein Netzwechsel in diesem Augenblick ist das Restrisiko.
   - Eine Dienstprüfung dauert höchstens etwa 2 × Timeout (Aufbau, dann Aushandlung und Antwort).
+
+### Ergänzung nach der Prüfrunde (10.10.2026, 22:10 Uhr)
+
+- **Plattenbudget der Rohwerte (B6):** `config.RAW_BUDGET_BYTES` = 250 MB, Schätzung 40 Byte je Rohwert. Die
+  stündliche Wartung zählt die Rohwerte der letzten 24 h; würden 30 Tage das Budget sprengen (nur bei extremen
+  Einstellungen, z. B. 64 Geräte mit je 8 Diensten im 10-s-Takt), wird früher zu Stundenmitteln verdichtet,
+  mindestens 1 Tag Rohwerte bleibt. `MonitorStatus.raw_keep_days` zeigt den Wert, das Log warnt. Im Normalfall
+  (30 Messreihen im 60-s-Takt ≈ 50 MB) bleibt es bei 30 Tagen wie im Pflichtenheft.
+- **Wettlauf Durchlauf ↔ API (B1):** Nach den Netzprüfungen liest der Monitor die Ziele unter einer kurzen Sperre
+  neu; abgeschaltete oder gelöschte Ziele und Prüfungen bekommen keinen Messwert, keine Alert-Auswertung und kein
+  `save_state`. Die API wartet höchstens Millisekunden.
+- **Router lernen (B3):** Die Router-MAC übernimmt ein Ziel erst, wenn das Gerät im Durchlauf wiedererkannt wurde
+  (ARP-Cache zeigt seine MAC bzw. eigener PC unter eigener Adresse).
+- **Eigener PC mit veralteter IP (B4):** pausiert (`no_adapter`) statt geprüft; ein Scan aktualisiert die Adresse.
+- **Wartung und Uhrsprünge (B5):** fällig nach 1 h Wanduhr oder 1 h monotoner Zeit; ein Sprung nach vorn holt je
+  Wartung höchstens 1 Tag auf (kein Verlust des Verlaufs durch eine falsch gestellte Uhr).
+- **Abbruch (B2):** Prüf-Threads sind Daemon-Threads; das Programmende wartet nicht auf laufende Prüfungen.

@@ -148,7 +148,8 @@ def test_scan_in_the_ui_finds_the_other_devices_as_new(demo_env) -> None:  # typ
     assert devices[demo.NAS_MAC].display_name == "NAS"  # Anzeigename bleibt
     # Neue Geräte lösen „Neues Gerät“-Alerts aus, ein neuer Port ist es nicht (alles wie im Inventar)
     active = svc.alerts.list(state="active")
-    assert {a.rule for a in active} == {"new_device"} and len(active) == 5
+    # der eigene PC (127.0.0.1) löst nie „Neues Gerät“ aus (BAUPLAN §34)
+    assert {a.rule for a in active} == {"new_device"} and len(active) == 4
 
 
 # --- Abbau -------------------------------------------------------------------------------------------

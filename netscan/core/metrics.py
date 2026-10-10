@@ -542,6 +542,11 @@ class MetricsStore:
             log.info("Messwerte: %d Werte aus %d verwaisten Messreihen entfernt", removed, len(orphans))
         return removed
 
+    def raw_rows_since(self, since: int) -> int:
+        """Zahl der Rohwerte ab since (Unix-Sekunden) – Grundlage für das Plattenbudget (BAUPLAN §34)."""
+        row = self.db.query_one("SELECT COUNT(*) AS n FROM samples WHERE ts >= ?", (int(since),))
+        return int(row["n"]) if row is not None and row["n"] is not None else 0
+
     def size_bytes(self) -> int:
         return self.db.size_bytes()
 
