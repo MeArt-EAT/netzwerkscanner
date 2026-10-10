@@ -143,15 +143,31 @@ class Inventory:
         assert stored is not None
         return stored
 
+    def checked_ports(self, mac: str) -> set[int]:
+        """Alle Ports, die je für dieses Gerät geprüft wurden (Stufe 2: Grundlage für „neuer offener Port“)."""
+        try:
+            mac = normalize_mac(mac)
+        except ValueError:
+            return set()
+        row = self.db.query_one("SELECT checked_ports FROM devices WHERE mac = ?", (mac,))
+        return _parse_port_list(row["checked_ports"]) if row is not None else set()
+
     def set_ports(self, mac: str, scanned_ports: Iterable[int], open_ports: list[PortResult]) -> list[PortResult]:
         """Speichert offene Ports. Löscht nur geprüfte Ports, die nicht mehr offen sind.
-        Gibt die Ports zurück, die vorher nicht offen gespeichert waren."""
+        Gibt die Ports zurück, die vorher nicht offen gespeichert waren. Merkt sich die geprüften Ports."""
         mac = normalize_mac(mac)
         now = utc_now_iso()
         scanned = {int(p) for p in scanned_ports}
         open_by_key = {(p.port, p.proto): p for p in open_ports}
         new_ports: list[PortResult] = []
         with self.db.transaction() as conn:
+            row = conn.execute("SELECT checked_ports FROM devices WHERE mac = ?", (mac,)).fetchone()
+            if row is not None:
+                merged = _parse_port_list(row["checked_ports"]) | scanned
+                conn.execute(
+                    "UPDATE devices SET checked_ports = ? WHERE mac = ?",
+                    (",".join(str(p) for p in sorted(merged)), mac),
+                )
             existing = {
                 (r["port"], r["proto"]) for r in conn.execute("SELECT port, proto FROM ports WHERE mac = ?", (mac,))
             }
@@ -309,3 +325,13 @@ def _ip_key(ip: str) -> tuple[int, ...]:
         return tuple(int(x) for x in ip.split("."))
     except ValueError:
         return (999,)
+
+
+def _parse_port_list(text: str | None) -> set[int]:
+    """„22,80,445“ -> {22, 80, 445}; Unsinn wird übergangen (Datenbank ist nicht vertrauenswürdig)."""
+    out: set[int] = set()
+    for part in (text or "").split(","):
+        part = part.strip()
+        if part.isdigit() and 0 < int(part) < 65536:
+            out.add(int(part))
+    return out

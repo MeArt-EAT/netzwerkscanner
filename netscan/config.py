@@ -76,6 +76,15 @@ class Settings:
     # True = frühere Regel aus dem Pflichtenheft: fremde Netze nur nach Bestätigung, Heimnetz merken.
     ask_before_foreign_scan: bool = False
     last_adapter: str | None = None
+    # Stufe 2 – Überwachung (BAUPLAN §28)
+    monitor_enabled: bool = True
+    monitor_interval_s: int = 60
+    monitor_timeout_ms: int = 1000
+    alert_offline_minutes: int = 5
+    alert_service_minutes: int = 2
+    alert_rtt_minutes: int = 5
+    alert_new_device: bool = True
+    alert_new_port: bool = True
 
     def blocked_ssids(self) -> set[str]:
         return set(PERMANENT_BLOCKED_SSIDS) | {s for s in self.blocked_ssids_extra if s}
@@ -97,7 +106,22 @@ SETTING_LIMITS: dict[str, tuple[float, float]] = {
     "names_timeout_s": (0.2, 2.0),
     "mdns_timeout_s": (0.5, 10.0),
     "ssdp_timeout_s": (0.5, 10.0),
+    "monitor_interval_s": (10, 3600),
+    "monitor_timeout_ms": (200, 2000),
+    "alert_offline_minutes": (1, 1440),
+    "alert_service_minutes": (1, 1440),
+    "alert_rtt_minutes": (1, 1440),
 }
+
+# Ziel-Einstellungen der Überwachung (BAUPLAN §28): None = Standard bzw. aus
+TARGET_LIMITS: dict[str, tuple[float, float]] = {
+    "offline_after_min": (1, 1440),
+    "rtt_threshold_ms": (1, 10000),
+    "tcp_port": (1, 65535),
+}
+MAX_TARGETS = 64
+MAX_CHECKS_PER_TARGET = 8
+DB_WARN_BYTES = 100 * 1024 * 1024  # ab dieser Dateigröße warnt die Oberfläche (Plattenhygiene)
 
 _FIELD_NAMES = {f.name for f in fields(Settings)}
 

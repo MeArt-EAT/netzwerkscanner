@@ -329,3 +329,337 @@ Reines HTML/CSS/JavaScript ohne Build-Schritt, keine Inline-Skripte, keine exter
 
 Jeder Agent liefert am Ende: geänderte Dateien, Testergebnis (Anzahl bestanden/fehlgeschlagen),
 **Vertragsfragen** (was am Bauplan fehlt oder nicht passt) und bekannte Grenzen.
+
+---
+
+# Teil 2: Stufe 2 – Überwachung (verbindlich ab 10.10.2026)
+
+Grundlage: Pflichtenheft, Abschnitt „Stufe 2 – Überwachung“. Alles aus Teil 1 gilt weiter (Konventionen §1,
+Namensliste §3, Tests nur über Loopback §15, Plattenhygiene §16, Rückmeldung §17). Wer etwas braucht, das hier
+nicht steht, ändert den Vertrag nicht selbst, sondern meldet es.
+
+## 18. Grundsätze der Überwachung
+
+- **Eigener Thread, kein Auftrag.** Der Monitor (`core/monitor.py`) läuft im Serverprozess neben dem
+  `JobRunner`. Scans und Monitor laufen gleichzeitig; der Monitor belegt nie den JobRunner. Gestartet wird er nur
+  von `server.run()` (echter Betrieb und Demo), nicht in Tests mit `create_app()`.
+- **Wächter vor jedem Durchlauf** (Abnahmepunkt aus Stufe 1): je Adapter `NetworkGuard.check(adapter, quiet=True)`.
+  Nur `allow` sendet. `block` ⇒ Ziele dieses Adapters pausieren (Grund `blocked`), `confirm` ⇒ pausieren
+  (Grund `confirm`). Es gibt keinen Weg, das zu übergehen. Der Monitor meldet das Ergebnis als `guard.result`,
+  wenn sich die Entscheidung ändert.
+- **Nur verbundene Netze.** Ein Ziel wird nur geprüft, wenn seine IP im Netz eines verbundenen Adapters liegt;
+  sonst Pause (Grund `no_adapter`). Jede Verbindung bindet an die IPv4 dieses Adapters (`source_ip`). Fehlt sie,
+  wird das Ziel pausiert (`no_adapter`), nicht als offline gewertet.
+- **Anderes Netz mit gleichem Adressbereich.** Ein Ziel merkt sich die Router-MAC seines Netzes (`gateway_mac`).
+  Meldet der Wächter eine andere Router-MAC, pausiert das Ziel (Grund `other_network`) – es wird nichts an fremde
+  Geräte mit zufällig gleicher IP gesendet und kein falscher Offline-Alert ausgelöst. Findet ein abgeschlossener
+  Scan das Gerät im aktuellen Netz, übernimmt das Ziel dessen Router-MAC (Scan-Rückmeldung §26).
+- **Wiedererkennung:** Nach den Erreichbarkeitstests liest der Monitor einmal den ARP-Cache
+  (`platform.neighbor_table()`, sendet nichts). Steht unter der IP eine andere MAC als die des Ziels, gilt das Ziel
+  als offline mit Hinweis „Unter <ip> antwortet ein anderes Gerät (<mac>)“. Nicht für den eigenen PC.
+- **Schonend:** ein Erreichbarkeitstest und die gewählten Dienstprüfungen je Ziel und Durchlauf, jede Netzoperation
+  ≤ 2 s, gedrosselt über einen eigenen `RateLimiter` (höchstens 50 Vorgänge/s), höchstens 16 Ziele gleichzeitig.
+  Keine Anmeldung, keine Passwörter, keine Inhalte speichern.
+- **Abbruch:** `Monitor.stop()` hält innerhalb von 5 s an (Programmende, Tests).
+- **Plattenhygiene:** Messwerte kompakt (§20), Rohwerte 30 Tage, danach Stundenmittel; Alerts mit Obergrenze;
+  der Monitor schreibt nichts ins Scan-Protokoll und loggt einen normalen Durchlauf höchstens auf DEBUG.
+
+## 19. Namensliste Stufe 2 (verbindlich – keine Synonyme)
+
+| Begriff | Bezeichner | Werte |
+|---|---|---|
+| Zielzustand | `MonitorTarget.status` | `unknown`, `online`, `degraded` (UI: gestört), `offline`, `paused` |
+| Pausengrund | `MonitorTarget.pause_code` | `blocked`, `confirm`, `no_adapter`, `other_network`, `disabled` |
+| Erreichbarkeitstest | `method` | `auto` (Ping, ohne Antwort TCP), `ping`, `tcp` |
+| Dienstprüfung | `ServiceCheck.kind` | `tcp`, `http`, `https`, `smb`, `ssh` |
+| Dienstzustand | `ServiceCheck.status` | `unknown`, `up`, `down` |
+| Monitor-Zustand | `MonitorStatus.state` | `stopped` (Thread aus), `off` (Einstellung aus), `idle` (keine aktiven Ziele), `running`, `paused` (alle aktiven Ziele pausiert) |
+| Alert-Regel | `Alert.rule` | `device_offline`, `service_down`, `rtt_high` (Zustands-Alerts, enden von selbst), `new_device`, `new_port` (Ereignis-Alerts, enden mit Quittieren) |
+| Alert-Schwere | `Alert.severity` | `info`, `warning`, `critical` (UI: Hinweis, Warnung, kritisch) |
+| Zeitraum | `range` | `24h`, `7d`, `30d`, `1y` |
+| Messreihe | `(target_id, check_id)` | `check_id = 0` ist die Erreichbarkeit des Geräts |
+
+„gestört“ (`degraded`) heißt: Gerät erreichbar, aber mindestens ein gewählter Dienst ist `down` oder die
+Antwortzeit liegt über dem Schwellwert des Ziels.
+
+## 20. Datenbank Schema 2 (`core/db.py`, Leitung, fertig)
+
+`SCHEMA_VERSION = 2`. Neue Datenbanken bekommen alles über `SCHEMA`; eine Datenbank aus Stufe 1 wird beim Öffnen
+erweitert (Spalte per `ALTER TABLE`, neue Tabellen per `CREATE TABLE IF NOT EXISTS`).
+
+- `devices.checked_ports TEXT NOT NULL DEFAULT ''` – kommagetrennt alle Ports, die je für dieses Gerät geprüft
+  wurden (Vereinigung über alle Scans). Grundlage für „neuer offener Port“: Alarm nur für Ports, die schon einmal
+  geprüft und damals nicht offen waren.
+- `monitor_targets` – ein Ziel je Gerät (`mac` UNIQUE, `ON DELETE CASCADE`), Einstellungen und letzter Zustand.
+- `service_checks` – Dienstprüfungen je Ziel (`UNIQUE(target_id, kind, port)`), Einstellungen und letzter Zustand.
+- `samples(target_id, check_id, ts, ok, rtt_ms)` – Rohwerte, `ts` = **Unix-Sekunden UTC** (Ausnahme von §1:
+  Zeitreihen kompakt), `ok` 0/1, `WITHOUT ROWID`, Primärschlüssel `(target_id, check_id, ts)`.
+- `samples_hourly(target_id, check_id, hour, n, up, rtt_avg, rtt_min, rtt_max)` – Stundenmittel, `hour` =
+  Unix-Sekunden der vollen Stunde.
+- `alerts` – Verlauf; höchstens ein aktiver Alert je `key` (Teilindex `WHERE closed IS NULL`).
+
+Abschätzung: 30 Messreihen im 60-s-Takt ≈ 1,3 Mio. Rohwerte in 30 Tagen ≈ 30–60 MB, danach ~1 MB pro Monat.
+
+## 21. Datentypen (`core/models.py`, Leitung, fertig)
+
+`CheckResult(ok, rtt_ms, detail, code, method)`, `ServiceCheck`, `MonitorTarget`, `Sample`, `Alert`,
+`MonitorStatus`, `ScanOutcome` – Feldnamen siehe Datei. Alle mit `to_dict()`; Zeitfelder als ISO-Text wie in
+Stufe 1, nur `Sample.ts`, `now`-Parameter (Unix-Sekunden) und die Zeitachsen der Diagramme (Millisekunden) sind
+Zahlen.
+
+## 22. Monitor (`core/monitor.py`) und Ziele (`core/targets.py`) – Leitung, fertig
+
+```python
+class TargetStore:                      # nur Datenbank, keine Netzlogik
+    def list(self, enabled_only=False) -> list[MonitorTarget]      # mit checks
+    def get(self, mac) / get_by_id(target_id) -> MonitorTarget | None
+    def add(self, mac, *, method, tcp_port, offline_after_min, rtt_threshold_ms, gateway_mac, network) -> MonitorTarget
+    def update(self, mac, **fields) -> MonitorTarget                # enabled, method, tcp_port, offline_after_min, rtt_threshold_ms
+    def remove(self, mac) -> MonitorTarget | None
+    def add_check(self, target_id, kind, port, path="/") -> ServiceCheck
+    def get_check(self, check_id) / update_check(check_id, enabled) / remove_check(check_id)
+    def save_state(self, target: MonitorTarget) -> None             # Zustandsfelder von Ziel und Checks
+    def set_network(self, target_id, gateway_mac, network) -> None
+
+class Monitor:
+    def __init__(self, services, *, clock=time.time)
+    def start() / stop(timeout=6.0) / trigger()                     # Thread „monitor“
+    def status() -> MonitorStatus
+    def run_cycle(now: float | None = None) -> MonitorStatus       # synchron (Tests); „Jetzt prüfen“ nutzt trigger()
+    def add_target(mac, *, method="auto", tcp_port=None, offline_after_min=None, rtt_threshold_ms=None,
+                   checks: list[dict] | None = None) -> MonitorTarget   # LookupError (Gerät), ValueError, TargetExists
+    def update_target(mac, **fields) -> MonitorTarget              # LookupError, ValueError
+    def remove_target(mac) -> None                                 # LookupError; löscht Messwerte, schließt Alerts
+    def add_check(mac, kind, port, path="/") -> ServiceCheck       # LookupError, ValueError, CheckExists
+    def update_check(check_id, enabled: bool) -> ServiceCheck      # LookupError
+    def remove_check(check_id) -> None                             # LookupError
+    def suggestions(mac) -> list[dict]                             # checks.suggest_checks + {active}
+    def on_scan(outcome: ScanOutcome) -> None                      # Router-MAC/Netz gesehener Ziele übernehmen
+```
+
+Ablauf `run_cycle`: Einstellungen laden → aktive Ziele → je Adapter Wächter → Erreichbarkeit (parallel) → ARP-Cache
+lesen (Wiedererkennung) → Dienstprüfungen nur bei erreichbarem Gerät (sonst Checks `unknown`, Detail „Gerät nicht
+erreichbar“) → Zustände berechnen (`down_since`, `rtt_high_since`, `status_since`) → `metrics.record()` →
+`alert_engine.evaluate_target/evaluate_check` → `targets.save_state` → Ereignisse. Einmal je Stunde Wartung:
+`metrics.compact(now)`, `alerts.prune(now)`, Dateigröße merken. Fehler in einem Durchlauf beenden nie den Thread.
+
+## 23. Prüfungen (`net/checks.py`, Agent checks)
+
+```python
+CHECK_KINDS = ("tcp", "http", "https", "smb", "ssh")
+DEFAULT_PORTS = {"http": 80, "https": 443, "smb": 445, "ssh": 22}
+def connect(ip, port, timeout_s, source_ip=None) -> socket.socket   # EINZIGER Weg ins Netz; Tests/Demo ersetzen ihn
+def check_tcp(ip, port, timeout_s, *, source_ip=None) -> CheckResult
+def check_http(ip, port, timeout_s, *, tls=False, path="/", source_ip=None) -> CheckResult
+def check_ssh(ip, port, timeout_s, *, source_ip=None) -> CheckResult
+def check_smb(ip, port, timeout_s, *, source_ip=None) -> CheckResult
+def run_check(kind, ip, port, timeout_s, *, path="/", source_ip=None) -> CheckResult      # Verteiler
+def check_reachability(ip, *, method, ping, timeout_ms, tcp_ports, source_ip=None) -> CheckResult
+def fallback_tcp_ports(device: Device) -> list[int]                 # höchstens 3, aus device.ports
+def suggest_checks(device: Device) -> list[dict]                     # [{kind, port, path, label, reason}]
+```
+
+- Alle Funktionen rufen `connect` über den Modulnamen (`checks.connect`), damit Tests und Demo ihn ersetzen.
+  Timeout auf 0,05–2 s begrenzt. Ist `source_ip` am System nicht vorhanden ⇒ `ports.SourceAddressGone` (wie Stufe 1).
+- `tcp`: offen = ok; abgelehnt ⇒ „Port geschlossen“, Zeitüberschreitung ⇒ „keine Antwort“.
+- `http`/`https`: `GET path` mit `Host: <ip>`, ohne Weiterleitungen zu folgen, höchstens 4 KB lesen, nichts speichern.
+  ok bei Statuscode 100–499 (401/403 = Dienst läuft, Anmeldung nötig), down bei 5xx oder ohne gültige Antwort.
+  `detail` z. B. „HTTP 200“, `code` = Statuscode. HTTPS ohne Zertifikatsprüfung (NAS mit eigenem Zertifikat);
+  die Bewertung von Zertifikaten kommt in Stufe 3.
+- `ssh`: ok, wenn die erste Zeile mit `SSH-` beginnt. `smb`: SMB2-NEGOTIATE ohne Anmeldung, ok bei einer Antwort, die
+  mit dem NetBIOS-Kopf und `\xfeSMB` oder `\xffSMB` beginnt; Port offen ohne SMB-Antwort ⇒ down
+  „Port offen, aber keine SMB-Antwort“.
+- `check_reachability`: `ping` ⇒ nur `ping(ip, timeout_ms)`; `tcp` ⇒ nur TCP auf `tcp_ports`; `auto` ⇒ erst Ping,
+  ohne Antwort TCP. Bei TCP gilt auch „Verbindung abgelehnt“ als erreichbar (das Gerät hat geantwortet).
+  `method` im Ergebnis: `ping` bzw. `tcp:<port>`.
+- `suggest_checks`: aus offenen Ports: 445→smb, 22→ssh, 80/8080/5000→http, 443/8443/5001→https, sonst bekannte
+  Dienste als `tcp` (z. B. 21, 139, 548, 631, 873, 1883, 3389, 8883, 9100). Nur Ports, die offen gespeichert sind.
+
+## 24. Messwerte (`core/metrics.py`, Agent metrics)
+
+```python
+RAW_KEEP_DAYS = 30
+HOURLY_KEEP_DAYS = 730
+class MetricsStore:
+    def __init__(self, db)
+    def record(self, samples: Iterable[Sample]) -> None              # eine Transaktion; gleicher Schlüssel ersetzt
+    def availability(self, target_id, check_id=0, *, since: int, until: int) -> dict
+        # {up_pct (None ohne Werte), samples, up} aus Roh- und Stundenwerten
+    def availability_map(self, now: int) -> dict[tuple[int, int], dict[str, dict]]   # {(t, c): {"24h": …, "7d": …}}
+    def series(self, target_id, check_id=0, *, since: int, until: int, max_points=400) -> dict
+        # {"bucket_s", "points": [{t (ms), rtt_avg, rtt_min, rtt_max, up_pct, n}]} – Eimer ohne Werte: n=0, Rest None
+    def trend(self, target_id, check_id=0, *, days=30, now: int) -> list[dict]   # [{day "YYYY-MM-DD" (UTC), up_pct, n}]
+    def compact(self, now: int, keep_days=RAW_KEEP_DAYS) -> int      # nur volle Stunden vor der Grenze; idempotent
+    def delete_series(self, target_id, check_id=None) -> int         # None = alle Reihen des Ziels
+    def prune_orphans(self, valid: set[tuple[int, int]]) -> int
+    def size_bytes(self) -> int                                     # page_count × page_size
+    def counts(self) -> dict                                       # {"raw": n, "hourly": n}
+```
+
+Verfügbarkeit = gute Messwerte / alle Messwerte im Zeitraum. Pausen sind Lücken, keine Ausfälle. Stundenwerte
+zählen mit ihren `n` und `up`. `24h`, `7d`, `30d` aus Rohwerten (plus Stundenwerte, falls schon verdichtet),
+`1y` überwiegend aus Stundenwerten. Stundenwerte älter als `HOURLY_KEEP_DAYS` entfernt `compact`.
+
+## 25. Alerts (`core/alerts.py`, Agent alerts)
+
+```python
+EVENT_RULES = frozenset({"new_device", "new_port"})
+ALERT_KEEP_DAYS = 365; ALERT_KEEP_MAX = 5000
+class AlertStore:
+    def __init__(self, db, bus)
+    def open(self, *, rule, key, severity, title, message, mac=None, target_id=None, check_id=None, now=None) -> Alert | None
+        # None, wenn für key schon ein aktiver Alert besteht (idempotent)
+    def close(self, key, now=None) -> Alert | None
+    def acknowledge(self, alert_id, now=None) -> Alert              # LookupError; Ereignis-Alerts werden dabei geschlossen
+    def acknowledge_all(self, now=None) -> int
+    def get(self, alert_id) -> Alert | None
+    def list(self, *, state="active", limit=200, mac=None) -> list[Alert]   # active | unacked | all; neueste zuerst
+    def counts(self) -> dict                                       # {"active", "unacked", "by_rule": {...}}
+    def frequency(self, *, days=30, now) -> list[dict]             # [{day, device_offline, service_down, rtt_high, new_device, new_port}]
+    def prune(self, now, keep_days=ALERT_KEEP_DAYS, keep_max=ALERT_KEEP_MAX) -> int   # nur geschlossene
+class AlertEngine:
+    def __init__(self, store, settings_store)
+    def evaluate_target(self, target, device, now: float) -> None   # device_offline, rtt_high
+    def evaluate_check(self, target, check, device, now: float) -> None   # service_down
+    def on_target_removed(self, target) -> None                     # schließt Zustands-Alerts des Ziels
+    def on_check_removed(self, target, check) -> None
+    def on_scan(self, outcome: ScanOutcome) -> None                 # new_device, new_port
+```
+
+`now` ist hier Unix-Sekunden (`float`); gespeichert wird ISO-Text (`opened`, `closed`, `acknowledged`).
+Regeln (Schwellen aus §28):
+- `device_offline` (Schlüssel `device_offline:<mac>`): Status `offline` seit `down_since` und mindestens
+  `target.offline_after_min` bzw. `alert_offline_minutes` Minuten ⇒ öffnen; Status `online`/`degraded` ⇒ schließen;
+  `paused`/`unknown` ⇒ nichts ändern. Schwere `critical` bei Router und Server/NAS, sonst `warning`.
+- `service_down` (`service_down:<check_id>`): Check `down` seit `down_since` ≥ `alert_service_minutes` ⇒ öffnen;
+  Check `up` oder `unknown` ⇒ schließen. Schwere `warning`.
+- `rtt_high` (`rtt_high:<mac>`): Schwellwert gesetzt, Antwortzeit darüber seit `rtt_high_since` ≥
+  `alert_rtt_minutes` ⇒ öffnen; `rtt_high_since` wieder leer (Antwortzeit darunter oder Gerät offline) ⇒ schließen.
+  Schwere `info`.
+- `new_device` (`new_device:<mac>`): abgeschlossener Scan, Gerät zum ersten Mal gesehen und nicht „bekannt“,
+  Einstellung `alert_new_device`. Schwere `warning`.
+- `new_port` (`new_port:<mac>:<port>`): Port war schon einmal geprüft und nicht offen, jetzt offen; Gerät nicht neu;
+  Einstellung `alert_new_port`. Schwere aus dem Port-Risiko: low→info, medium→warning, high/critical→critical.
+  Beim eigenen PC zusätzlich der Hinweis: „Eigener PC: lokal geprüft – die Windows-Firewall wird dabei nicht
+  berücksichtigt; von anderen Geräten aus kann der Port gesperrt sein.“
+- Titel und Meldung deutsch mit Gerätenamen (`display_name`), IP und – wo passend – Dienst und Port.
+- Ereignisse über den Bus: `alert.opened {alert}`, `alert.closed {alert}`, `alert.acknowledged {ids}`.
+
+## 26. Scan-Rückmeldung (`scan/pipeline.py`, `core/inventory.py`, Leitung, fertig)
+
+- `Inventory.set_ports` merkt sich zusätzlich die geprüften Ports (`checked_ports`); `Inventory.checked_ports(mac)`.
+- Nach einem abgeschlossenen Scan bzw. Tiefenscan ruft die Pipeline jeden Eintrag aus `services.scan_listeners`
+  mit einem `ScanOutcome(scan_id, kind, adapter, gateway_mac, seen_macs, new_devices, new_ports)` auf.
+  `new_ports` enthält nur Ports, die vorher schon geprüft und nicht offen waren. Fehler eines Empfängers werden
+  geloggt und stoppen den Scan nie. Standard-Empfänger: `alert_engine.on_scan`, `monitor.on_scan`.
+
+## 27. Web-API Stufe 2 (`web/monitor_api.py` und Ergänzungen in `web/server.py`, Agent api)
+
+`monitor_api.router = APIRouter(prefix="/api")`, in `create_app` eingebunden. Fehler wie in Stufe 1 als
+`{detail}`. MACs im Pfad werden normalisiert; ungültig oder unbekannt ⇒ 404.
+
+| Methode | Pfad | Ergebnis |
+|---|---|---|
+| GET | `/api/monitor` | `{status: MonitorStatus, targets: [TargetView]}` |
+| POST | `/api/monitor/targets` | Body `{mac, method?, tcp_port?, offline_after_min?, rtt_threshold_ms?, checks?: [{kind, port, path?}]}` → 201 `TargetView`; 404 Gerät unbekannt; 409 schon überwacht; 400 ungültig |
+| GET | `/api/monitor/targets/{mac}` | `TargetView`; 404 |
+| PATCH | `/api/monitor/targets/{mac}` | `{enabled?, method?, tcp_port?, offline_after_min?, rtt_threshold_ms?}` (null = zurücksetzen) → `TargetView` |
+| DELETE | `/api/monitor/targets/{mac}` | 204 – Messwerte gelöscht, Zustands-Alerts geschlossen |
+| GET | `/api/monitor/targets/{mac}/suggestions` | `[{kind, port, path, label, reason, active}]` – auch für noch nicht überwachte Geräte |
+| POST | `/api/monitor/targets/{mac}/checks` | `{kind, port, path?}` → 201 `ServiceCheck`; 409 doppelt |
+| PATCH | `/api/monitor/checks/{id}` | `{enabled}` → `ServiceCheck` |
+| DELETE | `/api/monitor/checks/{id}` | 204 |
+| POST | `/api/monitor/run` | 202 `{started: true}` – nächster Durchlauf sofort (`trigger()`, Wächter gilt) |
+| GET | `/api/metrics/series?mac=&check_id=0&range=24h` | `{range, since, until, bucket_s, points}` (t in ms) |
+| GET | `/api/metrics/trend?mac=&check_id=0&days=30` | `[{day, up_pct, n}]` (days 1–365) |
+| GET | `/api/metrics/overview` | `{counts: {online, degraded, offline, paused, unknown}, db_size_bytes, db_warn, samples: {raw, hourly}}` |
+| GET | `/api/alerts?state=active&limit=200&mac=` | `[Alert]` (state `active`, `unacked`, `all`; limit 1–1000) |
+| POST | `/api/alerts/{id}/ack` | `Alert`; 404 |
+| POST | `/api/alerts/ack-all` | `{acknowledged: n}` |
+| GET | `/api/alerts/stats?days=30` | `{days: [...frequency], counts}` |
+| GET | `/api/autostart` | `{supported, enabled, detail}` |
+| PUT | `/api/autostart` | `{enabled}` → wie GET; 501 ohne Unterstützung; 500 mit verständlicher Meldung bei Fehlschlag |
+
+- `TargetView` = `MonitorTarget.to_dict()` + `device {mac, ip, display_name, category, category_label, is_self,
+  online, mac_random}` + `availability {"24h": …, "7d": …}`; jede Prüfung in `checks` zusätzlich mit `availability`.
+- `/api/status` bekommt `monitor` (MonitorStatus) und `alerts` (`{active, unacked}`).
+- `PUT /api/settings`: die neuen Einstellungen aus §28 sind änderbar (Grenzen aus `config.SETTING_LIMITS`).
+- `DB_WARN_BYTES = 100 * 1024 * 1024` (in `config.py`) – `db_warn` ab dieser Größe.
+
+## 28. Einstellungen Stufe 2 (`config.py`, Leitung, fertig)
+
+| Feld | Standard | Grenzen |
+|---|---|---|
+| `monitor_enabled` | `True` | bool |
+| `monitor_interval_s` | 60 | 10–3600 |
+| `monitor_timeout_ms` | 1000 | 200–2000 |
+| `alert_offline_minutes` | 5 | 1–1440 |
+| `alert_service_minutes` | 2 | 1–1440 |
+| `alert_rtt_minutes` | 5 | 1–1440 |
+| `alert_new_device` | `True` | bool |
+| `alert_new_port` | `True` | bool |
+
+Ziel-Einstellungen (`config.TARGET_LIMITS`): `offline_after_min` 1–1440 oder null, `rtt_threshold_ms` 1–10000
+oder null, `tcp_port` 1–65535 oder null. `MAX_TARGETS = 64`, `MAX_CHECKS_PER_TARGET = 8`.
+
+## 29. Ereignisse Stufe 2 (`core/events.py` unverändert)
+
+| `type` | `data` |
+|---|---|
+| `monitor.status` | `{status}` – bei Zustandswechsel und nach jedem Durchlauf |
+| `monitor.cycle` | `{ts, targets: [{mac, status, rtt_ms, detail, checks: [{id, status, rtt_ms, detail}]}]}` |
+| `monitor.targets` | `{}` – Zielliste neu laden (Anlegen, Ändern, Löschen) |
+| `alert.opened` / `alert.closed` | `{alert}` |
+| `alert.acknowledged` | `{ids}` |
+
+## 30. Oberfläche Stufe 2 (`web/static/`, Agent frontend)
+
+- Neue Datei `static/monitor.js` (eigenes IIFE, reine Hilfsfunktionen mit `module.exports` für Node-Tests), dazu
+  die nötigen Ergänzungen in `index.html`, `app.js` und `style.css`. Chart.js 4.5.1 liegt fertig unter
+  `static/vendor/chart.umd.min.js` (MIT, Lizenz daneben). Kein Zeit-Adapter: x-Achse `linear` mit Millisekunden
+  und eigener Beschriftung. Keine Inline-Skripte, Netzdaten nur über `textContent`.
+- Reiter: Geräte | Netzwerkkarte | **Überwachung** | **Alerts** (mit Zähler offener Alerts) | Scan-Protokoll.
+- **Überwachung:** Monitor-Zustand mit Grund, „Jetzt prüfen“; Status-Übersicht (Kacheln und Diagramm); Tabelle der
+  Ziele (Name, IP, Status seit, Antwortzeit, Verfügbarkeit 24 h / 7 d, Dienste als Chips); Ziel wählen ⇒
+  Antwortzeit-Verlauf (Linie mit min/max-Band, Lücken sichtbar, Zeitraum 24 h / 7 d / 30 d / 1 Jahr) und
+  Verfügbarkeits-Trend (Balken je Tag).
+- **Alerts:** Liste (aktiv / unquittiert / alle), quittieren einzeln und alle, Alert-Häufigkeit (gestapelte Balken
+  je Tag und Regel, 30 Tage).
+- **Detailbereich Geräte:** Abschnitt „Überwachung“: an/aus, Dienstvorschläge zum An- und Abwählen, Schwellen.
+  Bei Handys (`phone`) und Geräten mit privater MAC der Datenschutz-Hinweis (Grundsatz 7): „Die Überwachung macht
+  sichtbar, wann diese Person zu Hause ist. Alle im Haushalt sollten davon wissen.“ Beim eigenen PC unter den Ports
+  der Firewall-Hinweis aus §25.
+- **Einstellungen:** Abschnitt Überwachung (an/aus, Intervall, Zeitschwellen, Alerts für neue Geräte/Ports) und
+  Autostart (nur Windows, mit Erklärung „startet mit der Anmeldung, ohne Adminrechte – ARP-Scan dann nicht möglich“).
+- **Statuszeile:** Monitor-Zustand, Dateigröße der Datenbank, ab 100 MB als Warnung.
+- Diagramme folgen Hell/Dunkel, Animation aus, alte Diagramme vor dem Neuzeichnen zerstören.
+
+## 31. Autostart (`platform/autostart.py`, Agent platform)
+
+`AutostartStatus(supported, enabled, detail)`, `autostart_status(*, run=None) -> AutostartStatus`,
+`set_autostart(enabled: bool, *, run=None) -> AutostartStatus` (`AutostartError` mit deutscher Meldung).
+Windows: Aufgabenplanung über `schtasks.exe`, Aufgabe „Netzwerkscanner“, Auslöser bei Anmeldung des aktuellen
+Benutzers, **`/RL LIMITED` (ohne Adminrechte)**, Aktion `"<venv>\Scripts\pythonw.exe" "<Projekt>\run_server.py"
+--no-browser`. Begründung: Projektordner und Python-Umgebung sind ohne Adminrechte beschreibbar (Übergabe §6); eine
+Aufgabe mit höchsten Rechten wäre eine dauerhafte Rechteausweitung ohne Rückfrage. Der Monitor braucht keine
+Adminrechte; für einen ARP-Scan weiter `start.bat` (meldet dann „läuft bereits“ – der Scan läuft ohne ARP).
+Linux: `supported=False` mit Hinweis auf systemd. Tests rufen `schtasks` nie wirklich auf (conftest sperrt es).
+
+## 32. Demo Stufe 2 (`demo.py`, Agent platform)
+
+Demo-Monitor mit Intervall 15 s; überwacht Router, NAS (SMB, HTTP 5000, SSH), PC und iPhone; künstlicher Verlauf der
+letzten 7 Tage; das Telnet-Gerät fällt regelmäßig aus (Offline-Alert), der HTTP-Dienst der NAS stoppt zeitweise
+(Dienst-Alert). `checks.connect` wird im Demo-Prozess auf die Sim-Ports umgeleitet (wie `ports.probe_port`).
+Sendet weiterhin nichts ins echte Netz.
+
+## 33. Zuständigkeit Stufe 2
+
+| Bereich | Dateien | Wer |
+|---|---|---|
+| Kern | `config.py`, `core/models.py`, `core/db.py`, `core/inventory.py`, `core/targets.py`, `core/monitor.py`, `core/services.py`, `core/guard.py` (nur `quiet`), `scan/pipeline.py`, `net/ports.py` (nur Text 8883), `tests/conftest.py`, `tests/fakes.py`, `tests/sim.py`, `tests/test_core_*`, `tests/test_monitor_*` | Leitung |
+| checks | `net/checks.py`, `tests/test_checks_*.py` | Agent checks (Ingenieur) |
+| metrics | `core/metrics.py`, `tests/test_metrics_*.py` | Agent metrics (Ingenieur) |
+| alerts | `core/alerts.py`, `tests/test_alerts_*.py` | Agent alerts (Ingenieur) |
+| api | `web/monitor_api.py`, `web/server.py`, `tests/test_api_monitor_*.py` | Agent api (Zeichner) |
+| frontend | `web/static/*` (außer `vendor/`), `tests/test_frontend_*.py` | Agent frontend (Ingenieur) |
+| platform | `platform/autostart.py`, `demo.py`, `tests/test_autostart_*.py`, `tests/test_demo_*.py` | Agent platform (Zeichner) |

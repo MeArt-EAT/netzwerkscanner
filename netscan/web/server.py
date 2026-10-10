@@ -42,7 +42,7 @@ from netscan.core.models import CATEGORIES, Adapter, Device, GuardResult, ScanRe
 from netscan.core.services import Services, build_services
 from netscan.net import adapters, arp, classify, oui
 from netscan.scan import pipeline
-from netscan.web import export
+from netscan.web import export, monitor_api
 
 log = logging.getLogger(__name__)
 
@@ -726,8 +726,11 @@ def _register_mime_types() -> None:
         mimetypes.add_type(mime, ext)
 
 
-def create_app(services: Services | None = None, port: int = DEFAULT_PORT) -> FastAPI:
-    """Baut die App. Ohne services wird build_services() beim Start aufgerufen."""
+def create_app(services: Services | None = None, port: int = DEFAULT_PORT, *, start_monitor: bool = False) -> FastAPI:
+    """Baut die App. Ohne services wird build_services() beim Start aufgerufen.
+
+    start_monitor: Überwachung mit dem Server starten (nur server.run(), nie in Tests – BAUPLAN §18).
+    """
     _register_mime_types()
 
     @asynccontextmanager
@@ -739,9 +742,13 @@ def create_app(services: Services | None = None, port: int = DEFAULT_PORT) -> Fa
             app.state.services = svc
             owned = True
         svc.bus.attach_loop(asyncio.get_running_loop())
+        if start_monitor:
+            svc.monitor.start()
         try:
             yield
         finally:
+            if start_monitor:
+                await asyncio.to_thread(svc.monitor.stop)
             svc.bus.detach_loop()
             if owned:
                 app.state.services = None
@@ -760,6 +767,7 @@ def create_app(services: Services | None = None, port: int = DEFAULT_PORT) -> Fa
     app.state.allowed_origins = allowed_origins(port)
 
     app.include_router(router)
+    app.include_router(monitor_api.router)
     app.add_api_websocket_route("/ws", websocket_endpoint)
 
     @app.exception_handler(Exception)
@@ -821,7 +829,7 @@ def run(port: int = DEFAULT_PORT, open_browser: bool = False, services: Services
         log.error("Port %d ist belegt – läuft der Scanner schon?", port)
         sys.exit(2)
 
-    app = create_app(services, port=port)
+    app = create_app(services, port=port, start_monitor=True)
     # access_log=False: keine Zeile je Anfrage aus der Ereignisschleife auf die Konsole. Im klassischen
     # Konsolenfenster blockiert jede Ausgabe, solange dort Text markiert ist – dann stünde die Oberfläche still.
     server = uvicorn.Server(uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False))

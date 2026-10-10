@@ -14,7 +14,17 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from netscan import config
 from netscan.core.context import GuardBlocked, ScanCancelled, ScanContext
-from netscan.core.models import Adapter, Device, GuardResult, NameInfo, PingResult, PortResult, ScanRequest, normalize_mac
+from netscan.core.models import (
+    Adapter,
+    Device,
+    GuardResult,
+    NameInfo,
+    PingResult,
+    PortResult,
+    ScanOutcome,
+    ScanRequest,
+    normalize_mac,
+)
 from netscan.net import adapters, arp, classify, names, oui, ping, ports, ssdp
 
 if TYPE_CHECKING:
@@ -421,26 +431,46 @@ def run_scan(ctx: ScanContext, request: ScanRequest, services: Services) -> dict
             enricher.run(ctx, job, devices)
 
         ctx.check_cancel()
+        new_ports: dict[str, list[PortResult]] = {}
         for i, d in enumerate(devices, 1):
+            # Vor dem Speichern: welche Ports waren für dieses Gerät schon einmal geprüft? (Stufe 2, BAUPLAN §26)
+            checked_before = inventory.checked_ports(d.mac) if d.mac in job.previous else set()
             inventory.record_seen(d, scan_id)
             if d.mac in job.scanned_ports:
-                inventory.set_ports(d.mac, job.scanned_ports[d.mac], d.ports)
+                opened = inventory.set_ports(d.mac, job.scanned_ports[d.mac], d.ports)
+                reopened = [p for p in opened if p.proto == "tcp" and p.port in checked_before]
+                if reopened:
+                    new_ports[d.mac] = reopened
             ctx.progress("Speichern", i, len(devices))
         count = len(devices)
         result = "completed"
         inventory.finish_scan(scan_id, result, count)
         finished = True
         # device.updated erst nach dem Abschluss: online und is_new gelten dann gegen diesen Scan (BAUPLAN §5).
-        new_count = 0
+        new_devices: list[Device] = []
         for d in devices:
             stored = inventory.get(d.mac)
             if stored is None:
                 continue
             if stored.first_seen_scan == scan_id and not stored.known:
-                new_count += 1
+                new_devices.append(stored)
             ctx.emit("device.updated", {"device": stored.to_dict()})
+        new_count = len(new_devices)
         duration = round(time.monotonic() - t0, 1)
         ctx.log(f"Scan fertig: {count} Gerät(e), davon {new_count} neu, {duration} s.")
+        if new_ports:
+            by_mac = {d.mac: d for d in devices}
+            listed = "; ".join(
+                f"{by_mac[m].display_name if m in by_mac else m}: {', '.join(str(p.port) for p in ps)}"
+                for m, ps in new_ports.items()
+            )
+            ctx.log(f"Neu geöffnete Ports (vorher geprüft und geschlossen): {listed}.", "warning")
+        services.notify_scan(
+            ScanOutcome(
+                scan_id=scan_id, kind="scan", adapter=adapter, gateway_mac=guard.gateway_mac,
+                seen_macs=[d.mac for d in devices], new_devices=new_devices, new_ports=new_ports,
+            )
+        )  # fmt: skip
         return {"devices": count, "new": new_count, "duration_s": duration, "network": adapter.network, "scan_id": scan_id}
     except ScanCancelled:
         result = "cancelled"
@@ -519,6 +549,7 @@ def run_deep_scan(ctx: ScanContext, mac: str, services: Services, adapter_name: 
                 f"Die Adresse {adapter.ipv4} von „{adapter.name}“ ist während des Tiefenscans verschwunden – "
                 "vermutlich ein Netzwechsel. Tiefenscan abgebrochen, nichts gespeichert."
             ) from exc
+        checked_before = inventory.checked_ports(device.mac)
         new_ports = inventory.set_ports(device.mac, port_list, found)
         current = inventory.get(device.mac)
         assert current is not None
@@ -532,6 +563,13 @@ def run_deep_scan(ctx: ScanContext, mac: str, services: Services, adapter_name: 
         if new_ports:
             ctx.log(f"Neu offen: {', '.join(f'{p.port}/{p.service}' for p in new_ports)}.", "warning")
         ctx.log(f"Tiefenscan fertig: {len(found)} offene Port(s), {duration} s.")
+        reopened = [p for p in new_ports if p.proto == "tcp" and p.port in checked_before]
+        services.notify_scan(
+            ScanOutcome(
+                scan_id=scan_id, kind="deep_scan", adapter=adapter, gateway_mac=None, seen_macs=[device.mac],
+                new_devices=[], new_ports={device.mac: reopened} if reopened else {},
+            )
+        )  # fmt: skip
         return {
             "mac": device.mac,
             "open_ports": [p.port for p in found],

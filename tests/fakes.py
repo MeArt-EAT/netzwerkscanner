@@ -150,3 +150,144 @@ class FakeArpSender:
         if self.delay_s:
             time.sleep(self.delay_s)
         return {ip: self.answers[ip] for ip in ips if ip in self.answers}
+
+
+# =====================================================================================
+# Stufe 2 – Attrappen für die Überwachung (BAUPLAN §22–25)
+# =====================================================================================
+
+
+def seed_device(services, mac: str, ip: str, **fields):  # type: ignore[no-untyped-def]
+    """Legt ein Gerät im Inventar an (wie nach einem Scan) und gibt es zurück. fields: Device-Felder."""
+    from netscan.core.models import Device
+
+    inv = services.inventory
+    scan_id = inv.begin_scan("scan", "Ethernet", "192.168.178.0/24")
+    device = Device(mac=normalize_mac(mac), ip=ip, discovered_by=["ping"], **fields)
+    inv.record_seen(device, scan_id)
+    if device.ports:
+        inv.set_ports(device.mac, [p.port for p in device.ports], device.ports)
+    inv.finish_scan(scan_id, "completed", 1)
+    stored = inv.get(device.mac)
+    assert stored is not None
+    return stored
+
+
+class FakeChecks:
+    """Ersetzt netscan.net.checks im Monitor-Test: Ergebnisse je IP bzw. (IP, Art, Port) frei einstellbar.
+
+    install(monkeypatch) hängt die Funktionen an das Modul. Sendet nichts.
+    """
+
+    def __init__(self) -> None:
+        from netscan.core.models import CheckResult
+
+        self._CheckResult = CheckResult
+        self.reach: dict[str, CheckResult] = {}  # IP -> Ergebnis; fehlt = keine Antwort
+        self.service: dict[tuple[str, str, int], CheckResult] = {}  # (IP, Art, Port) -> Ergebnis; fehlt = down
+        self.reach_calls: list[tuple[str, str, list[int], str | None]] = []
+        self.service_calls: list[tuple[str, str, int, str | None]] = []
+        self.raise_gone: set[str] = set()  # IPs, bei denen die Absenderadresse fehlt
+
+    def online(self, ip: str, rtt_ms: float = 2.0) -> None:
+        self.reach[ip] = self._CheckResult(ok=True, rtt_ms=rtt_ms, detail="Ping-Antwort", method="ping")
+
+    def offline(self, ip: str) -> None:
+        self.reach.pop(ip, None)
+
+    def service_up(self, ip: str, kind: str, port: int, rtt_ms: float = 3.0) -> None:
+        self.service[(ip, kind, port)] = self._CheckResult(ok=True, rtt_ms=rtt_ms, detail=f"{kind} ok", method=f"{kind}:{port}")
+
+    def service_down(self, ip: str, kind: str, port: int) -> None:
+        self.service.pop((ip, kind, port), None)
+
+    # --- Ersatzfunktionen ------------------------------------------------------------------
+    def check_reachability(self, ip, *, method, ping, timeout_ms, tcp_ports, source_ip=None):  # type: ignore[no-untyped-def]
+        from netscan.net.ports import SourceAddressGone
+
+        self.reach_calls.append((ip, method, list(tcp_ports), source_ip))
+        if ip in self.raise_gone:
+            raise SourceAddressGone(f"{source_ip} fehlt")
+        return self.reach.get(ip) or self._CheckResult(ok=False, detail="keine Antwort", method="ping")
+
+    def run_check(self, kind, ip, port, timeout_s, *, path="/", source_ip=None):  # type: ignore[no-untyped-def]
+        self.service_calls.append((ip, kind, port, source_ip))
+        return self.service.get((ip, kind, port)) or self._CheckResult(ok=False, detail="Port geschlossen", method=f"{kind}:{port}")
+
+    @staticmethod
+    def fallback_tcp_ports(device):  # type: ignore[no-untyped-def]
+        return [p.port for p in device.ports][:3]
+
+    @staticmethod
+    def suggest_checks(device):  # type: ignore[no-untyped-def]
+        return [{"kind": "tcp", "port": p.port, "path": "/", "label": f"TCP {p.port}", "reason": "offen"} for p in device.ports]
+
+    def install(self, monkeypatch) -> FakeChecks:  # type: ignore[no-untyped-def]
+        from netscan.net import checks
+
+        for name in ("check_reachability", "run_check", "fallback_tcp_ports", "suggest_checks"):
+            monkeypatch.setattr(checks, name, getattr(self, name))
+        return self
+
+
+class RecordingMetrics:
+    """MetricsStore-Attrappe: merkt sich Messwerte und Aufrufe."""
+
+    def __init__(self) -> None:
+        self.samples: list = []
+        self.deleted: list[tuple[int, int | None]] = []
+        self.compacted: list[int] = []
+        self.pruned: list[set] = []
+
+    def record(self, samples) -> None:  # type: ignore[no-untyped-def]
+        self.samples.extend(samples)
+
+    def delete_series(self, target_id: int, check_id: int | None = None) -> int:
+        self.deleted.append((target_id, check_id))
+        return 0
+
+    def compact(self, now: int, keep_days: int = 30) -> int:
+        self.compacted.append(now)
+        return 0
+
+    def prune_orphans(self, valid) -> int:  # type: ignore[no-untyped-def]
+        self.pruned.append(set(valid))
+        return 0
+
+    def size_bytes(self) -> int:
+        return 0
+
+
+class RecordingAlertEngine:
+    """AlertEngine-Attrappe: merkt sich, was der Monitor auswerten lässt (Zustände als Kopie)."""
+
+    def __init__(self) -> None:
+        self.targets: list[tuple[str, str, str | None, float]] = []  # (mac, status, down_since, now)
+        self.checks: list[tuple[int, str, str | None]] = []  # (check_id, status, down_since)
+        self.removed_targets: list[str] = []
+        self.removed_checks: list[int] = []
+        self.scans: list = []
+
+    def evaluate_target(self, target, device, now) -> None:  # type: ignore[no-untyped-def]
+        self.targets.append((target.mac, target.status, target.down_since, now))
+
+    def evaluate_check(self, target, check, device, now) -> None:  # type: ignore[no-untyped-def]
+        self.checks.append((check.id, check.status, check.down_since))
+
+    def on_target_removed(self, target) -> None:  # type: ignore[no-untyped-def]
+        self.removed_targets.append(target.mac)
+
+    def on_check_removed(self, target, check) -> None:  # type: ignore[no-untyped-def]
+        self.removed_checks.append(check.id)
+
+    def on_scan(self, outcome) -> None:  # type: ignore[no-untyped-def]
+        self.scans.append(outcome)
+
+
+class RecordingAlertStore:
+    def __init__(self) -> None:
+        self.pruned: list[float] = []
+
+    def prune(self, now, keep_days=365, keep_max=5000) -> int:  # type: ignore[no-untyped-def]
+        self.pruned.append(now)
+        return 0

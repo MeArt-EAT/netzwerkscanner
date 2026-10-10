@@ -109,12 +109,20 @@ def _getnameinfo(sockaddr: tuple, flags: int):  # type: ignore[no-untyped-def]
 
 
 _NET_TOOLS = {"ping", "ping.exe", "arping", "nmap", "nmap.exe", "tracert", "tracert.exe", "traceroute"}
+# Stufe 2: Tests dürfen nie eine echte Aufgabe in der Windows-Aufgabenplanung anlegen oder löschen.
+_SYSTEM_CHANGERS = {"schtasks", "schtasks.exe"}
 _RealPopen = subprocess.Popen
+
+
+class SystemChangeError(AssertionError):
+    """Ein Test wollte die Systemkonfiguration ändern (z. B. Aufgabenplanung)."""
 
 
 class _GuardedPopen(_RealPopen):  # type: ignore[misc,valid-type]
     def __init__(self, args, *a, **kw):  # type: ignore[no-untyped-def]
         parts = [str(x) for x in (args if isinstance(args, (list, tuple)) else str(args).split())]
+        if parts and os.path.basename(parts[0]).lower() in _SYSTEM_CHANGERS:
+            raise SystemChangeError(f"{parts[0]} ist im Test verboten – run-Parameter injizieren")
         if parts and os.path.basename(parts[0]).lower() in _NET_TOOLS:
             for p in parts[1:]:
                 try:

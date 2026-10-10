@@ -127,7 +127,9 @@ PORT_TABLE: dict[int, PortSpec] = {
                  "Zusätzliche verschlüsselte Weboberfläche (HTTPS). "
                  "Firmware aktuell halten und ein starkes Passwort setzen."),
         PortSpec(8883, "mqtt-tls", "low",
-                 "MQTT über TLS ist verschlüsselt. Anmeldung mit eigenem Passwort verwenden."),
+                 "Üblicher Port für MQTT über TLS. Eingeordnet nur nach der Portnummer: Manche Broker lauschen "
+                 "hier auch im Klartext – ob wirklich verschlüsselt wird, zeigt erst die TLS-Prüfung (Stufe 3). "
+                 "Anmeldung mit eigenem Passwort verwenden."),
         PortSpec(9100, "jetdirect", "medium",
                  "Rohdruckdienst (JetDirect) ohne Anmeldung – jedes Gerät im Netz kann drucken und Druckerbefehle "
                  "senden. Wenn möglich abschalten und IPP (Port 631) verwenden."),

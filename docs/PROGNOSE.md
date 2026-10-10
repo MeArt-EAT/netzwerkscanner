@@ -41,3 +41,26 @@ trotzdem gereicht, weil die Arbeit parallel lief.
 |---|---|---|---|
 | 2 Überwachung | 2–2½ h | ~10 % | ~3 % |
 | 3 Sicherheit und SNMP | 3–4 h | ~15–20 % | ~5 % |
+
+# Prognose und Istwerte – Stufe 2 (Überwachung)
+
+Prognose vom 10.10.2026, 19:20 Uhr. Abo Max, Leitung Opus 5.5, Ultracode an (jeder Prüfbefund wird von zwei
+unabhängigen Gegenprüfern bewertet). Gebaut wird auf dem Zweig `stufe-2` in einem eigenen Arbeitsordner
+(`.claude/worktrees/stufe-2`), damit der Projektordner für die Abnahme von Stufe 1 auf `main` bleibt.
+Stand beim Start: 5-h-Fenster 1 %, Woche 7 %.
+
+| Phase | Wer | Prognose Dauer | Ist Dauer | Ist Kontingent (5-h-Fenster / Woche) |
+|---|---|---|---|---|
+| 1 Bauplan Stufe 2, Kern (Datenbank v2, Monitor, Ereignisse, Attrappen, Sim-Labor) | Leitung (Opus) | 30–45 min | | |
+| 2 Module bauen, 6 Agenten parallel | 4 Ingenieure (Opus), 2 Zeichner (Sonnet) | 40–60 min | | |
+| 3 Zusammenbau, Ende-zu-Ende-Test, Demo im Browser | Leitung | 25–40 min | | |
+| 4 Prüfung (4 Schwerpunkte, je Befund 2 Gegenprüfer, Nachbesserung) | Ingenieure | 70–110 min | | |
+| 5 README, Checkliste, Istwerte, Tag `v2.0-stufe2-rc1` | Zeichner und Leitung | 15–20 min | | |
+| **Summe** | | **3–4½ h** | | |
+
+- Umfang: 11.000–14.000 Zeilen, etwa die Hälfte Tests (Stufe 1: 21.000; Stufe 2 laut Pflichtenheft ~60 % davon).
+- Tokens: 5–7 Mio. verarbeitet (überwiegend Zwischenspeicher), davon 0,4–0,7 Mio. Output (Stufe 1: 4,0 Mio.).
+- Kontingent: 20–30 % eines 5-h-Fensters (verteilt über ein bis zwei Fenster), Woche +6–9 %.
+- Plattenbudget beim Bau: Agent-Protokolle dieses Projekts höchstens 400 MB (Start: 27 MB), Prüfung nach jeder Phase.
+- Plattenbudget im Betrieb: 10 überwachte Geräte mit je 2 Diensten ≈ 30–60 MB Messwerte nach 30 Tagen, danach
+  etwa 1 MB pro Monat (Stundenmittel). Anzeige der Dateigröße, Warnung ab 100 MB.

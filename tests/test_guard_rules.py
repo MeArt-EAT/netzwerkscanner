@@ -372,7 +372,15 @@ def test_permanent_name_cannot_be_removed_or_overridden(
 
 
 def test_check_has_no_override_parameter() -> None:
-    assert list(inspect.signature(NetworkGuard.check).parameters) == ["self", "adapter"]
+    # Stufe 2: nur „quiet“ (Log-Stufe für den Monitor) ist dazugekommen – kein Parameter, der block übergeht.
+    assert list(inspect.signature(NetworkGuard.check).parameters) == ["self", "adapter", "quiet"]
+
+
+def test_quiet_changes_only_logging(guard: NetworkGuard, fake: FlakyPlatform) -> None:
+    join_hotspot(fake)
+    loud, quiet = guard.check(wlan_hotspot()), guard.check(wlan_hotspot(), quiet=True)
+    assert loud.decision == quiet.decision == "block"
+    assert loud.code == quiet.code == "blocked_ssid"
 
 
 def test_learned_mac_is_stored_once(guard: NetworkGuard, fake: FlakyPlatform, store: SettingsStore) -> None:

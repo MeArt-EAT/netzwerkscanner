@@ -393,7 +393,8 @@ def test_bind_host_ist_loopback():
 
 def test_run_hat_keine_option_fuer_die_adresse():
     assert list(inspect.signature(server.run).parameters) == ["port", "open_browser", "services"]
-    assert list(inspect.signature(server.create_app).parameters) == ["services", "port"]
+    # Stufe 2: start_monitor (nur server.run startet die Überwachung) – weiterhin keine Option für die Adresse
+    assert list(inspect.signature(server.create_app).parameters) == ["services", "port", "start_monitor"]
 
 
 def test_run_uebergibt_bind_host_an_uvicorn(fake_uvicorn, env):

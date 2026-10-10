@@ -32,6 +32,34 @@ JobResult = Literal["completed", "cancelled", "failed", "blocked"]
 GuardDecision = Literal["allow", "confirm", "block"]
 GuardCode = Literal["ok_home", "ok_network", "blocked_ssid", "blocked_gateway", "foreign_network", "unknown_network", "no_gateway"]
 
+# Stufe 2 – Überwachung (BAUPLAN §19)
+TargetStatus = Literal["unknown", "online", "degraded", "offline", "paused"]
+TARGET_STATUS_LABELS: dict[str, str] = {
+    "unknown": "unbekannt",
+    "online": "online",
+    "degraded": "gestört",
+    "offline": "offline",
+    "paused": "pausiert",
+}
+PauseCode = Literal["blocked", "confirm", "no_adapter", "other_network", "disabled"]
+ReachMethod = Literal["auto", "ping", "tcp"]
+REACH_METHODS: tuple[str, ...] = ("auto", "ping", "tcp")
+CheckKind = Literal["tcp", "http", "https", "smb", "ssh"]
+CHECK_KINDS: tuple[str, ...] = ("tcp", "http", "https", "smb", "ssh")
+CheckStatus = Literal["unknown", "up", "down"]
+MonitorState = Literal["stopped", "off", "idle", "running", "paused"]
+AlertRule = Literal["device_offline", "service_down", "rtt_high", "new_device", "new_port"]
+ALERT_RULES: tuple[str, ...] = ("device_offline", "service_down", "rtt_high", "new_device", "new_port")
+ALERT_RULE_LABELS: dict[str, str] = {
+    "device_offline": "Gerät offline",
+    "service_down": "Dienst ausgefallen",
+    "rtt_high": "Antwortzeit hoch",
+    "new_device": "Neues Gerät",
+    "new_port": "Neuer offener Port",
+}
+AlertSeverity = Literal["info", "warning", "critical"]
+SEVERITY_LABELS: dict[str, str] = {"info": "Hinweis", "warning": "Warnung", "critical": "kritisch"}
+
 _MAC_HEX = re.compile(r"[0-9a-fA-F]")
 
 
@@ -246,3 +274,170 @@ class JobStatus:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# =====================================================================================
+# Stufe 2 – Überwachung (BAUPLAN §21)
+# =====================================================================================
+
+
+def iso_from_ts(ts: float | None) -> str | None:
+    """Unix-Sekunden -> ISO 8601 in UTC (sekundengenau); None bleibt None."""
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(int(ts), timezone.utc).isoformat(timespec="seconds")
+
+
+def ts_from_iso(text: str | None) -> float | None:
+    """ISO 8601 -> Unix-Sekunden; None oder Unsinn ergibt None."""
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(text))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+@dataclass
+class CheckResult:
+    """Ergebnis einer einzelnen Prüfung (Erreichbarkeit oder Dienst)."""
+
+    ok: bool
+    rtt_ms: float | None = None
+    detail: str = ""  # deutscher Kurztext, z. B. „HTTP 200“, „keine Antwort“, „Port geschlossen“
+    code: int | None = None  # HTTP-Statuscode
+    method: str = ""  # „ping“, „tcp:445“, „http:80“ …
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ServiceCheck:
+    id: int
+    target_id: int
+    kind: CheckKind
+    port: int
+    path: str = "/"
+    enabled: bool = True
+    status: CheckStatus = "unknown"
+    status_since: str | None = None
+    last_check: str | None = None
+    last_rtt_ms: float | None = None
+    last_detail: str = ""
+    down_since: str | None = None  # Beginn der laufenden Störung (für die Alert-Schwelle)
+
+    @property
+    def label(self) -> str:
+        names = {"tcp": "TCP", "http": "HTTP", "https": "HTTPS", "smb": "SMB-Freigabe", "ssh": "SSH"}
+        return f"{names.get(self.kind, self.kind)} {self.port}"
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["label"] = self.label
+        return d
+
+
+@dataclass
+class MonitorTarget:
+    id: int
+    mac: str
+    enabled: bool = True
+    method: ReachMethod = "auto"
+    tcp_port: int | None = None  # fester Port für den TCP-Test; None = aus den offenen Ports
+    offline_after_min: int | None = None  # None = Einstellung alert_offline_minutes
+    rtt_threshold_ms: float | None = None  # None = keine Regel „Antwortzeit hoch“
+    gateway_mac: str | None = None  # Router des Netzes, in dem das Ziel überwacht wird
+    network: str | None = None
+    created: str = ""
+    status: TargetStatus = "unknown"
+    status_since: str | None = None
+    pause_code: PauseCode | None = None
+    pause_reason: str = ""  # deutscher Text zur Pause
+    last_check: str | None = None
+    last_rtt_ms: float | None = None
+    last_detail: str = ""
+    last_method: str = ""
+    down_since: str | None = None
+    rtt_high_since: str | None = None
+    checks: list[ServiceCheck] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["status_label"] = TARGET_STATUS_LABELS.get(self.status, self.status)
+        d["checks"] = [c.to_dict() for c in self.checks]
+        return d
+
+
+@dataclass
+class Sample:
+    """Ein Messwert. check_id 0 = Erreichbarkeit des Geräts. ts in Unix-Sekunden (UTC)."""
+
+    target_id: int
+    check_id: int
+    ts: int
+    ok: bool
+    rtt_ms: float | None = None
+
+
+@dataclass
+class Alert:
+    id: int
+    rule: AlertRule
+    key: str
+    severity: AlertSeverity
+    title: str
+    message: str = ""
+    mac: str | None = None
+    target_id: int | None = None
+    check_id: int | None = None
+    opened: str = ""
+    closed: str | None = None
+    acknowledged: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.closed is None
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["active"] = self.active
+        d["rule_label"] = ALERT_RULE_LABELS.get(self.rule, self.rule)
+        d["severity_label"] = SEVERITY_LABELS.get(self.severity, self.severity)
+        return d
+
+
+@dataclass
+class MonitorStatus:
+    state: MonitorState = "stopped"
+    reason: str = ""  # deutscher Text, z. B. warum pausiert
+    interval_s: int = 60
+    last_cycle: str | None = None
+    next_cycle: str | None = None
+    cycle_ms: float | None = None
+    targets: int = 0  # aktive Ziele
+    online: int = 0
+    degraded: int = 0
+    offline: int = 0
+    paused: int = 0
+    unknown: int = 0
+    db_size_bytes: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ScanOutcome:
+    """Rückmeldung eines abgeschlossenen Scans an die Überwachung (BAUPLAN §26)."""
+
+    scan_id: int
+    kind: str  # "scan" | "deep_scan"
+    adapter: Adapter
+    gateway_mac: str | None = None
+    seen_macs: list[str] = field(default_factory=list)
+    new_devices: list[Device] = field(default_factory=list)
+    new_ports: dict[str, list[PortResult]] = field(default_factory=dict)  # MAC -> neu offene, vorher geprüfte Ports

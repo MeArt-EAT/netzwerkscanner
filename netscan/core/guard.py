@@ -151,14 +151,20 @@ class NetworkGuard:
         self.settings_store = settings_store
 
     # --- öffentlich ----------------------------------------------------------------
-    def check(self, adapter: Adapter | None) -> GuardResult:
-        """Entscheidung allow / confirm / block für einen Scan über adapter. Sendet keine Pakete."""
+    def check(self, adapter: Adapter | None, *, quiet: bool = False) -> GuardResult:
+        """Entscheidung allow / confirm / block für einen Scan über adapter. Sendet keine Pakete.
+
+        quiet: für den Monitor (jede Minute) – „allow“ nur auf DEBUG loggen; Sperren bleiben WARNING.
+        """
         try:
             result = self._evaluate(adapter)
         except Exception:  # noqa: BLE001 – ein Fehler im Wächter darf nie zu allow führen
             log.exception("Netz-Wächter: unerwarteter Fehler – Ergebnis höchstens „confirm“")
             result = self._emergency_result()
-        level = logging.WARNING if result.decision == "block" else logging.INFO
+        if result.decision == "block":
+            level = logging.WARNING
+        else:
+            level = logging.DEBUG if quiet and result.decision == "allow" else logging.INFO
         log.log(level, "Netz-Wächter: %s/%s für %s", result.decision, result.code, adapter.name if adapter else "-")
         return result
 
