@@ -233,6 +233,15 @@ class Inventory:
         assert device is not None
         return device
 
+    def set_auto_category(self, mac: str, category: str, reason: str) -> None:
+        """Automatische Einordnung ändern, ohne last_seen zu berühren (Tiefenscan). Nutzerwahl bleibt."""
+        if category not in CATEGORIES:
+            raise ValueError(f"Unbekannte Kategorie: {category}")
+        self.db.execute(
+            "UPDATE devices SET category = ?, category_reason = ? WHERE mac = ? AND category_source = 'auto'",
+            (category, reason, normalize_mac(mac)),
+        )
+
     def inventory_view(self) -> list[dict[str, Any]]:
         """Schnittstelle für Stufe 4: [{mac, ip, name}]."""
         return [{"mac": d.mac, "ip": d.ip, "name": d.display_name} for d in self.list_devices()]

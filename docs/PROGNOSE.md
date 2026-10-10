@@ -4,8 +4,8 @@ Prognose vom 10.10.2026, Abo Max, Modell der Leitung: Opus 5.5. Istwerte werden 
 
 | Phase | Prognose Dauer | Prognose Output-Tokens | Ist Dauer | Ist Kontingent (5-h-Fenster) |
 |---|---|---|---|---|
-| 1 Bauplan, Gerüst, Umgebung | 25–40 min | 40–60 k | | |
-| 2 Module bauen (6 parallel) | 45–75 min | 180–300 k | | |
+| 1 Bauplan, Gerüst, Umgebung | 25–40 min | 40–60 k | ~20 min (13:50–14:10) | 0 % → 1 % |
+| 2 Module bauen (6 parallel) | 45–75 min | 180–300 k | Start 14:12 | |
 | 3 Zusammenbau, Gesamttest | 30–60 min | 40–70 k | | |
 | 4 Prüfung und Nachbesserung | 30–45 min | 50–90 k | | |
 | 5 Endabnahme, README, Versionsmarke | 10–20 min | 15–30 k | | |
