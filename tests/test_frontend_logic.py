@@ -72,7 +72,7 @@ out.number = ui.formatNumber(40316);
 out.results = {
   scan: ui.describeResult({ kind: "scan", result: "completed", summary: { devices: 26, new: 3, duration_s: 14.6, network: "192.168.178.0/24" } }),
   one: ui.describeResult({ kind: "scan", result: "completed", summary: { devices: 1, new: 0 } }),
-  deep: ui.describeResult({ kind: "deep_scan", result: "completed", summary: { open_ports: 1, new_ports: 0, duration_s: 70 } }),
+  deep: ui.describeResult({ kind: "deep_scan", result: "completed", summary: { open_ports: [22], new_ports: [], duration_s: 70 } }),  // echtes Format: Listen
   oui: ui.describeResult({ kind: "oui_update", result: "completed", summary: { entries: 41000 } }),
   cancelled: ui.describeResult({ kind: "scan", result: "cancelled", summary: {} }),
   blocked: ui.describeResult({ kind: "scan", result: "blocked", error: "WLAN gesperrt" }),

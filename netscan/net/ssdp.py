@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 import socket
 import time
-import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -156,35 +156,131 @@ def _is_multicast(host: str) -> bool:
 # --- Beschreibung laden ------------------------------------------------------------------------
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Folgt keiner Weiterleitung – sonst ginge eine Anfrage doch an einen Dritten."""
+_MAX_HEAD_BYTES = 16 * 1024  # Kopfzeilen einer Antwort
+_STATUS_LINE = re.compile(rb"^HTTP/1\.[01][ \t]+(\d{3})\b")
 
-    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
-        return None
+
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("Beschreibung kommt zu langsam")
+    return left
+
+
+def _head_end(data: bytes | bytearray) -> int | None:
+    """Position hinter der Leerzeile nach den Kopfzeilen; None, solange sie noch fehlt."""
+    for sep in (b"\r\n\r\n", b"\n\n"):
+        index = data.find(sep)
+        if index >= 0:
+            return index + len(sep)
+    return None
+
+
+def _parse_head(head: bytes) -> tuple[int, dict[str, str]]:
+    """(Status, Kopfzeilen klein geschrieben; der erste Wert gewinnt). Keine HTTP-Antwort ⇒ ValueError."""
+    lines = head.replace(b"\r\n", b"\n").split(b"\n")
+    match = _STATUS_LINE.match(lines[0])
+    if not match:
+        raise ValueError("Keine HTTP-Antwort")
+    headers: dict[str, str] = {}
+    for line in lines[1 : 1 + _MAX_HEADER_LINES]:
+        key, sep, value = line.decode("latin-1").partition(":")
+        key = key.strip().lower()
+        if sep and key and key not in headers:
+            headers[key] = value.strip()
+    return int(match.group(1)), headers
+
+
+def _dechunk(data: bytes) -> bytes:
+    """Transfer-Encoding: chunked auflösen (manche Geräte senden das trotz HTTP/1.0). Unvollständig ⇒ ValueError."""
+    out = bytearray()
+    pos = 0
+    while True:
+        end = data.find(b"\r\n", pos)
+        if end < 0:
+            raise ValueError("Unvollständige Antwort")
+        try:
+            size = int(data[pos:end].split(b";", 1)[0].strip(), 16)
+        except ValueError as exc:
+            raise ValueError("Ungültige Blocklänge") from exc
+        if size == 0:
+            return bytes(out)
+        start = end + 2
+        if start + size > len(data):
+            raise ValueError("Unvollständige Antwort")
+        out += data[start : start + size]
+        if len(out) > _MAX_DESCRIPTION_BYTES:
+            raise ValueError("Beschreibung zu groß")
+        pos = start + size + 2
 
 
 def _fetch_http(url: str, timeout_s: float) -> bytes:
-    """Standard-fetch: HTTP-GET mit urllib. Ohne Proxy, ohne Weiterleitung, höchstens 256 KB, Gesamtzeit begrenzt."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
-    request = urllib.request.Request(url, headers={"User-Agent": "Netzwerkscanner", "Accept": "text/xml, */*;q=0.5"})
-    deadline = time.monotonic() + timeout_s
-    with opener.open(request, timeout=timeout_s) as response:
-        length = response.headers.get("Content-Length")
-        if length and length.isdigit() and int(length) > _MAX_DESCRIPTION_BYTES:
-            raise ValueError("Beschreibung zu groß")
-        chunks: list[bytes] = []
-        size = 0
+    """Standard-fetch: einfaches HTTP/1.0-GET über einen eigenen Socket – ohne Proxy, ohne Weiterleitung,
+    höchstens 256 KB. Die Zeitgrenze timeout_s gilt für Verbindung, Kopfzeilen und Inhalt zusammen: jedes
+    recv wartet höchstens bis zur Frist. Ein Gerät, das Byte für Byte tröpfelt, hält den Scan nicht auf."""
+    parts = urlsplit(url)
+    if parts.scheme != "http" or not parts.hostname:
+        raise ValueError("Nur http-Adressen")
+    address = str(ipaddress.IPv4Address(parts.hostname))  # nur IP-Literale, keine Namensauflösung
+    port = parts.port or 80
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    request = (
+        f"GET {target} HTTP/1.0\r\nHost: {address}:{port}\r\nUser-Agent: Netzwerkscanner\r\n"
+        "Accept: text/xml, */*;q=0.5\r\nConnection: close\r\n\r\n"
+    ).encode("ascii")
+    deadline = time.monotonic() + max(0.05, float(timeout_s))
+    data = bytearray()
+    body_start: int | None = None
+    length: int | None = None
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.settimeout(_remaining(deadline))
+        sock.connect((address, port))
+        sock.settimeout(_remaining(deadline))
+        sock.sendall(request)
         while True:
-            chunk = response.read(min(8192, _MAX_DESCRIPTION_BYTES + 1 - size))
+            sock.settimeout(max(0.01, _remaining(deadline)))
+            chunk = sock.recv(8192)
             if not chunk:
                 break
-            size += len(chunk)
-            if size > _MAX_DESCRIPTION_BYTES:
+            data += chunk
+            if body_start is None:
+                body_start = _head_end(data)
+                if body_start is None:
+                    if len(data) > _MAX_HEAD_BYTES:
+                        raise ValueError("Kopfzeilen zu lang")
+                    continue
+                status, headers = _parse_head(bytes(data[:body_start]))
+                if status != 200:
+                    raise ValueError(f"HTTP-Status {status}")  # auch 3xx: keiner Weiterleitung folgen
+                raw_length = headers.get("content-length", "")
+                if raw_length.isdigit() and "chunked" not in headers.get("transfer-encoding", "").lower():
+                    length = int(raw_length)
+                    if length > _MAX_DESCRIPTION_BYTES:
+                        raise ValueError("Beschreibung zu groß")
+            body_size = len(data) - body_start
+            if body_size > _MAX_DESCRIPTION_BYTES + _MAX_HEAD_BYTES:  # Reserve für chunked-Blockköpfe
                 raise ValueError("Beschreibung zu groß")
-            chunks.append(chunk)
-            if time.monotonic() > deadline:
-                raise TimeoutError("Beschreibung kommt zu langsam")
-        return b"".join(chunks)
+            if length is not None and body_size >= length:
+                break  # alles da – nicht auf das Schließen der Verbindung warten
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    if body_start is None:
+        raise ValueError("Antwort ohne Kopfzeilen")
+    status, headers = _parse_head(bytes(data[:body_start]))
+    body = bytes(data[body_start:])
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = _dechunk(body)
+    elif length is not None:
+        if len(body) < length:
+            raise ValueError("Unvollständige Antwort")
+        body = body[:length]
+    if len(body) > _MAX_DESCRIPTION_BYTES:
+        raise ValueError("Beschreibung zu groß")
+    return body
 
 
 # --- Suche -------------------------------------------------------------------------------------

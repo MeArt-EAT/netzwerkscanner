@@ -369,11 +369,16 @@ def test_tiefenscan_ip_im_netz_eines_anderen_adapters_prueft_dessen_netz(client,
 
 
 def test_tiefenscan_ip_in_keinem_netz_nimmt_last_adapter(client, env):
+    # Gewählt wird last_adapter (BAUPLAN §12). Liegt die IP aber nicht in dessen Netz, würde die Pipeline den
+    # Auftrag ohnehin ablehnen – deshalb 422 sofort, ohne erst eine Freigabe für ein fremdes Netz zu erfragen.
     (dev,) = add_devices(env.svc, sample_device(ip="10.77.0.9"))
     env.svc.settings.update(last_adapter="Ethernet")
-    assert client.post(f"/api/devices/{dev.mac}/deep-scan", json={}).status_code == 202
-    env.wait_job()
-    assert env.deep_calls[-1][1] == "Ethernet"
+    checked = len(env.guard.checked)
+    r = client.post(f"/api/devices/{dev.mac}/deep-scan", json={"confirm_foreign": True})
+    assert r.status_code == 422
+    assert "Ethernet" in r.json()["detail"] and "10.77.0.9" in r.json()["detail"]
+    assert len(env.guard.checked) == checked  # der Wächter wurde gar nicht gefragt
+    assert env.deep_calls == []
 
 
 def test_tiefenscan_404_ohne_passenden_adapter(client, env):
@@ -629,7 +634,7 @@ def test_oui_update_409_wenn_belegt(client, env):
 def test_oui_update_fehler_wird_gemeldet(client, env, monkeypatch):
     from netscan.net import oui
 
-    def boom(data_dir, fetch=None):
+    def boom(data_dir, fetch=None, **kwargs):  # kwargs: ctx (abbrechbar)
         raise OSError("keine Verbindung")
 
     monkeypatch.setattr(oui, "update_from_ieee", boom)

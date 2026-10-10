@@ -176,8 +176,12 @@ def test_einstellungen_koennen_die_sperre_nicht_aufheben(api, services, fake_pla
     ):
         assert api.put("/api/settings", json=body).status_code == 400
     assert services.settings.load().blocked_gateway_macs == [HOTSPOT_GW_MAC]
-    # Hotspot-Router als „Heimnetz“ eintragen hebt die Sperre nicht auf (Namens-Sperre kommt zuerst)
-    assert api.put("/api/settings", json={"home_gateway_macs": [HOTSPOT_GW_MAC]}).status_code == 200
+    # Hotspot-Router als „Heimnetz“ eintragen geht nicht (BAUPLAN §10: gesperrte MAC nie Heimnetz) …
+    r = api.put("/api/settings", json={"home_gateway_macs": [HOTSPOT_GW_MAC]})
+    assert r.status_code == 400 and "gesperrt" in r.json()["detail"]
+    assert HOTSPOT_GW_MAC not in services.settings.load().home_gateway_macs
+    # … und selbst ein so eingetragener Router hebt die Sperre nicht auf (Namens-Sperre kommt zuerst)
+    services.settings.update(home_gateway_macs=[HOTSPOT_GW_MAC])
     assert api.post("/api/scan", json={"adapter": "WLAN", "confirm_foreign": True}).status_code == 423
     fake_platform.wifi_unreadable()
     assert api.post("/api/scan", json={"adapter": "WLAN", "confirm_foreign": True}).status_code == 423

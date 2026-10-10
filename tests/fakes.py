@@ -62,6 +62,8 @@ class FakePlatform:
     wifi: WifiStatus = field(default_factory=lambda: WifiStatus([WifiEntry("WLAN", True, "Heimnetz")], readable=True))
     gateways: dict[str | None, str | None] = field(default_factory=lambda: {None: HOME_GW_IP, "Ethernet": HOME_GW_IP, "WLAN": HOME_GW_IP})
     neighbors: dict[str, str] = field(default_factory=lambda: {HOME_GW_IP: HOME_GW_MAC})
+    # ARP-Cache je Schnittstelle (für neighbor_mac(ip, interface)); fehlt die Schnittstelle, gilt neighbors
+    iface_neighbors: dict[str, dict[str, str]] = field(default_factory=dict)
     alive: dict[str, PingResult] = field(default_factory=dict)  # ip -> Ergebnis; fehlt = keine Antwort
     admin: bool = True
     ping_calls: list[str] = field(default_factory=list)
@@ -70,8 +72,9 @@ class FakePlatform:
     def connect_wifi(self, ssid: str | None, interface: str = "WLAN", readable: bool = True) -> None:
         self.wifi = WifiStatus([WifiEntry(interface, True, ssid)], readable=readable)
 
-    def wifi_unreadable(self, error: str = "Standortberechtigung fehlt") -> None:
-        self.wifi = WifiStatus([], readable=False, error=error)
+    def wifi_unreadable(self, error: str = "Standortberechtigung fehlt", profiles: dict[str, str] | None = None) -> None:
+        """WLAN-Name nicht lesbar; profiles = Netzwerkprofilnamen je Adapter (Windows: Get-NetConnectionProfile)."""
+        self.wifi = WifiStatus([], readable=False, error=error, profile_names=dict(profiles or {}))
 
     def set_gateway(self, ip: str | None, mac: str | None, adapter: str | None = None) -> None:
         for key in ([adapter] if adapter else [None, "Ethernet", "WLAN"]):
@@ -97,7 +100,9 @@ class FakePlatform:
     def neighbor_table(self) -> dict[str, str]:
         return dict(self.neighbors)
 
-    def neighbor_mac(self, ip: str) -> str | None:
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None:
+        if interface is not None and interface in self.iface_neighbors:
+            return self.iface_neighbors[interface].get(ip)
         return self.neighbors.get(ip)
 
     def ping(self, ip: str, timeout_ms: int) -> PingResult:

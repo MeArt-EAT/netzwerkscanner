@@ -110,7 +110,7 @@ Der Webserver abonniert mit `bus.subscribe()` und leitet an den WebSocket weiter
 
 - `JobRunner.start(kind, label, fn)` startet `fn(ctx)` in einem eigenen Thread. Läuft schon ein
   Auftrag → `JobBusyError`. Genau **ein** Auftrag zur Zeit.
-- `fn` gibt ein `summary`-Dict zurück. `ScanCancelled` → `result=cancelled`, `GuardBlocked` →
+- `fn` gibt ein `summary`-Dict zurück. Nur `ScanCancelled` → `result=cancelled`, `GuardBlocked` →
   `blocked`, jede andere Ausnahme → `failed` (Traceback ins Logfile, kurze Meldung ins Protokoll).
 - `JobRunner.cancel()` setzt das `CancelToken`. **Abbruch muss innerhalb von 5 s greifen:**
   jede Schleife ruft `ctx.check_cancel()`, jede Netzoperation hat ein Timeout ≤ 2 s,
@@ -131,10 +131,13 @@ class Platform(Protocol):
     def wifi_status(self) -> WifiStatus           # verbundene WLANs und ihre Namen (SSID)
     def default_gateway(self, adapter_name: str | None = None) -> str | None
     def neighbor_table(self) -> dict[str, str]    # IP -> MAC aus dem ARP-Cache des Systems, sendet NICHTS
-    def neighbor_mac(self, ip: str) -> str | None
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None   # mit interface nur dessen ARP-Abschnitt
     def ping(self, ip: str, timeout_ms: int) -> PingResult
     def is_admin(self) -> bool
 ```
+
+`WifiStatus.profile_names` (Adapter → Name des Netzwerkprofils, Windows: `Get-NetConnectionProfile`, braucht
+keine Standortberechtigung) wird nur abgefragt, wenn netsh keinen Namen liefert, und dient **nur zum Sperren**.
 
 Windows-Hinweise (für Agent guard):
 - `netsh wlan show interfaces` ist **sprachabhängig** (deutsch: „Status : Verbunden“) und braucht seit
@@ -156,12 +159,12 @@ Signaturen stehen als Platzhalter in den Dateien und sind verbindlich.
 | Modul | Funktion |
 |---|---|
 | adapters | `list_adapters(platform, include_virtual=False) -> list[Adapter]`, `find_adapter(platform, name) -> Adapter \| None`, `hosts_of(adapter) -> list[str]` |
-| arp | `arp_scan(ctx, adapter, hosts, sender=None) -> dict[ip, mac]`, `scapy_status() -> tuple[bool, str]`, `ArpUnavailable` (Scapy/Npcap/Rechte fehlen → Pipeline fällt auf Ping + ARP-Cache zurück) |
+| arp | `arp_scan(ctx, adapter, hosts, sender=None) -> dict[ip, mac]` (Blöcke ≤ rate_pps, Paketabstand 1/rate_pps), `scapy_status() -> tuple[bool, str]`, `ArpUnavailable` (Scapy/Npcap/Rechte fehlen → Pipeline fällt auf Ping + ARP-Cache zurück) |
 | ping | `ping_sweep(ctx, hosts) -> dict[ip, PingResult]` (nur erreichbare) |
-| oui | `OuiDb.load(data_dir)` (None ⇒ nur mitgelieferte Liste), `.lookup(mac)`, `.entries`, `.source`; `is_random_mac(mac)`; `update_from_ieee(data_dir, fetch=None, *, min_entries=10000) -> int` (danach lädt der Server `OuiDb.load` neu) |
+| oui | `OuiDb.load(data_dir)` (None ⇒ nur mitgelieferte Liste), `.lookup(mac)`, `.entries`, `.source`; `is_random_mac(mac)`; `update_from_ieee(data_dir, fetch=None, *, min_entries=10000, ctx=None) -> int` (abbrechbar) (danach lädt der Server `OuiDb.load` neu) |
 | names | `resolve_names(ctx, ips, adapter, *, resolver=None, netbios_port=137, mdns_browser=None) -> dict[ip, NameInfo]` |
 | ssdp | `ssdp_discover(ctx, adapter, *, target=("239.255.255.250", 1900), allowed_ips=None, fetch=None) -> dict[ip, SsdpInfo]` |
-| ports | `COMMON_PORTS`, `PORT_TABLE`, `DEEP_PORTS`, `describe_port(port) -> PortSpec`, `probe_port(ip, port, timeout_s, read_banner) -> (offen, banner)`, `scan_ports(ctx, targets: dict[ip, list[int]]) -> dict[ip, list[PortResult]]` (ruft `probe_port` über den Modulnamen auf) |
+| ports | `COMMON_PORTS`, `PORT_TABLE`, `DEEP_PORTS`, `describe_port(port) -> PortSpec`, `probe_port(ip, port, timeout_s, read_banner, source_ip=None) -> (offen, banner)`, `SourceAddressGone`, `scan_ports(ctx, targets: dict[ip, list[int]]) -> dict[ip, list[PortResult]]` (ruft `probe_port` über den Modulnamen auf) |
 | classify | `classify(device) -> tuple[category, reason]`, `apply_classification(devices) -> None` (lässt `category_source == "user"` unangetastet) |
 
 Testbarkeit: Jede Funktion, die Pakete sendet, hat einen injizierbaren Parameter
@@ -175,7 +178,11 @@ Testbarkeit: Jede Funktion, die Pakete sendet, hat einen injizierbaren Parameter
 2. Adapter und Netz bestimmen. Präfix ≥ /24 normal; /22–/23 Warnung im Protokoll; kleiner als /22 ⇒ Abbruch mit Meldung.
 3. Gerätesuche: `full` ⇒ ARP über alle Hosts + Ping-Ergänzung für den Rest; MAC für Ping-Treffer aus `neighbor_table()`.
    `registered` ⇒ nur letzte IPs eingetragener Geräte anpingen (+ ARP, falls verfügbar); **kein** Absuchen.
+   Im Modus `registered` zählen nur Antworten mit **eingetragener MAC** (auch beim Router); kein SSDP-/mDNS-Multicast;
+   Port-Scan nur für bestätigte Geräte.
    Null-, Broadcast- und Multicast-MACs werden verworfen; antwortet eine MAC für mehrere IPs, zählt die erste.
+   Vor Ping, Namen, SSDP und Ports wird geprüft, ob Adapter und Netz noch dieselben sind (Wächter erneut;
+   Wechsel ⇒ `NetworkChanged`, Ergebnis failed; gesperrt ⇒ `GuardBlocked`).
    Ohne Npcap/Adminrechte: nur Ping + ARP-Cache, mit Warnung.
 4. Eigenen PC (`is_self`) und Router (`is_gateway`) ergänzen.
 5. Gespeicherte Nutzerangaben übernehmen (`inventory.merge_user_fields`).
@@ -185,7 +192,9 @@ Testbarkeit: Jede Funktion, die Pakete sendet, hat einen injizierbaren Parameter
 7. Speichern: `inventory.record_seen()`, `inventory.set_ports()`, je Gerät `device.updated`.
 8. Ende: `devices.changed`, Summary `{devices, new, duration_s, network}`.
 
-`run_deep_scan(ctx, mac, services)`: Ports 1–1024 eines Geräts, neu einordnen, speichern.
+`run_deep_scan(ctx, mac, services)`: erst prüfen, ob die IP noch zur MAC gehört (sonst Abbruch mit Meldung),
+dann Ports 1–1024 eines Geräts, neu einordnen, speichern. Ausnahmen vom Port-Scan nach Kategorie gelten auch für
+neue Geräte (vorläufige Einordnung).
 Fortschrittsphasen (UI-Text): „Gerätesuche (ARP)“, „Ping“, „Namen“, „SSDP/UPnP“, „Ports“, „Einordnung“, „Speichern“.
 
 ## 10. Netz-Wächter (`core/guard.py`, Agent guard) – sicherheitskritisch
@@ -207,8 +216,13 @@ Regeln in dieser Reihenfolge:
 6. Sonst ⇒ `confirm`/`foreign_network` (MAC bekannt) bzw. `unknown_network` (MAC unbekannt).
    Ist der WLAN-Name nicht lesbar, sagt `reason` das dazu.
 
-Hinweis: Ohne Standortberechtigung (Windows 11 24H2) ist der WLAN-Name nie lesbar; dann wirkt nur die gelernte
-MAC-Regel. `start.bat` und die Oberfläche weisen darauf hin.
+Ohne Standortberechtigung (Windows 11 24H2) liefert netsh keinen WLAN-Namen. Dann gilt zusätzlich:
+- Heißt ein verbundenes Netzwerkprofil (`profile_names`) exakt wie ein gesperrter Name ⇒ block/blocked_ssid
+  (und MAC lernen). Der Profilname wird nie für allow verwendet.
+- `remember_home(mac, adapter)` lehnt über einen WLAN-Adapter mit unlesbarem Namen ab (`HomeRefused` ⇒ API 422);
+  die Oberfläche bietet „Das ist mein Heimnetz“ dann nicht an.
+- Gesperrte MACs werden aus `home_gateway_macs` entfernt; Regel 5 rechnet mit Heimnetz minus gesperrt.
+`start.bat` und die Oberfläche weisen auf die fehlende Standortberechtigung hin.
 
 Es gibt **keinen** Parameter, keine Einstellung und keine Schaltfläche, die `block` übergeht.
 `blocked_gateway_macs` ist über die API nur lesbar. Geprüft wird vor jedem Scan, jedem Tiefenscan
@@ -253,7 +267,7 @@ Lauscht **nur** auf `127.0.0.1` (Konstante `BIND_HOST`, keine Option dafür), Po
 | GET | `/api/job` | `JobStatus` |
 | GET | `/api/devices` | `[Device]` |
 | GET/PATCH | `/api/devices/{mac}` | Gerät / Nutzerfelder ändern |
-| POST | `/api/devices/{mac}/deep-scan` | Body `{confirm_foreign}` – gleiche Codes wie `/api/scan`; Adapter = der, in dessen Netz die Geräte-IP liegt (sonst `last_adapter`) |
+| POST | `/api/devices/{mac}/deep-scan` | Body `{confirm_foreign}` – gleiche Codes wie `/api/scan`; Adapter = der, in dessen Netz die Geräte-IP liegt; liegt sie in keinem ⇒ 422; Gerät antwortet nicht mehr unter der IP ⇒ Auftrag endet mit Meldung |
 | GET | `/api/inventory` | `[{mac, ip, name}]` |
 | GET | `/api/scans`, `/api/log?scan_id=&limit=500` | Verlauf, Protokoll |
 | GET | `/api/export/{json\|csv\|html}` | Datei-Download (`Content-Disposition`) |

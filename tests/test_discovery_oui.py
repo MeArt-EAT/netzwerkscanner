@@ -328,7 +328,8 @@ def test_default_fetch_uses_timeout_and_user_agent(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(oui.urllib.request, "urlopen", fake_urlopen)
     assert update_from_ieee(tmp_path, min_entries=1) == 5
     ((request, timeout),) = calls
-    assert timeout == 30
+    # kurze Zeitgrenze je Socket-Operation, damit ein Abbruch binnen 5 s greift (BAUPLAN §6)
+    assert timeout == oui.FETCH_TIMEOUT_S and 0 < timeout < 5
     assert request.full_url == OUI_URL  # type: ignore[attr-defined]
     assert request.get_header("User-agent") == "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Netzwerkscanner-OUI-Update"  # type: ignore[attr-defined]
 

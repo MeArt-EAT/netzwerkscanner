@@ -35,6 +35,10 @@ CSV_COLUMNS: tuple[str, ...] = (
 
 # Zeichen, mit denen Excel einen Zellinhalt als Formel liest (CSV-Injection)
 _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+# Formelzeichen hinter Komma, Semikolon oder Zeilenumbruch im Freitext: Liest jemand die Datei mit Komma als
+# Trennzeichen (englisches Excel, Importdialog), beginnt dort eine neue Zelle – auch trotz Anführungszeichen,
+# denn nach dem ersten Feld einer Zeile laufen die Felder im Leser ineinander. Dann ein ' davor setzen.
+_FORMULA_AFTER_SEPARATOR = re.compile(r"""([,;\r\n][ \t"']*)(?=[=+\-@])""")
 
 
 # --- JSON -----------------------------------------------------------------------------------
@@ -54,9 +58,13 @@ def _yes_no(value: bool) -> str:
 
 
 def _csv_text(value: str | None) -> str:
-    """Freitext für Excel entschärfen: ein führendes = + - @ würde als Formel ausgeführt."""
+    """Freitext für Excel entschärfen: ein führendes = + - @ würde als Formel ausgeführt – ebenso eines direkt
+    hinter einem Komma, Semikolon oder Zeilenumbruch, wenn die Datei mit anderem Trennzeichen geöffnet wird."""
     text = value or ""
-    if text and text[0] in _FORMULA_START:
+    if not text:
+        return text
+    text = _FORMULA_AFTER_SEPARATOR.sub(lambda m: m.group(1) + "'", text)
+    if text[0] in _FORMULA_START:
         return "'" + text
     return text
 
@@ -66,11 +74,16 @@ def _port_text(port: PortResult) -> str:
 
 
 def to_csv(devices: list[Device]) -> str:
-    """Semikolon-getrennt, beginnt mit BOM (\\ufeff) für Excel. Eine Zeile je Gerät, Ports als „22/ssh, 80/http“."""
+    """Semikolon-getrennt, beginnt mit BOM (\\ufeff) für Excel. Eine Zeile je Gerät, Ports als „22/ssh, 80/http“.
+
+    Jedes Datenfeld steht in Anführungszeichen (QUOTE_ALL): Öffnet jemand die Datei mit Komma als Trennzeichen
+    (englisches Excel, Importdialog), bleibt „TV,=HYPERLINK(…)“ trotzdem eine Zelle und wird keine Formel.
+    Die feste Kopfzeile enthält keine Fremddaten und bleibt ohne Anführungszeichen.
+    """
     buf = io.StringIO(newline="")
     buf.write("﻿")
-    writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n")
-    writer.writerow(CSV_COLUMNS)
+    csv.writer(buf, delimiter=";", quoting=csv.QUOTE_MINIMAL, lineterminator="\r\n").writerow(CSV_COLUMNS)
+    writer = csv.writer(buf, delimiter=";", quoting=csv.QUOTE_ALL, lineterminator="\r\n")
     for d in devices:
         ports = sorted(d.ports, key=lambda p: (p.proto, p.port))
         risk = d.max_risk

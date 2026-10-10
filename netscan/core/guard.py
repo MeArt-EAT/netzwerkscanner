@@ -6,6 +6,11 @@ Grundsätze:
 - Im Zweifel nie allow: jede Ausnahme der Plattform führt höchstens zu confirm. Ist der
   WLAN-Status gar nicht abfragbar, gilt der WLAN-Name als „nicht lesbar“.
 - Der Wächter sendet keine Pakete; er fragt nur den Systemzustand ab (WLAN, Routen, ARP-Cache).
+- Ist der WLAN-Name nicht lesbar (Windows ohne Standortberechtigung), zählt zusätzlich der Name des
+  Netzwerkprofils (WifiStatus.profile_names) – aber nur in Sperr-Richtung: Heißt ein Profil exakt wie
+  ein gesperrtes WLAN, gilt das wie ein verbundenes gesperrtes WLAN (block, Router-MAC wird gelernt).
+  Für allow zählt der Profilname nie, und ein Heimnetz über WLAN lässt sich ohne lesbaren Namen nicht
+  merken (remember_home ⇒ HomeRefused).
 """
 
 from __future__ import annotations
@@ -18,9 +23,13 @@ from netscan.config import PERMANENT_BLOCKED_SSIDS, Settings, SettingsStore
 from netscan.core.models import Adapter, GuardResult, normalize_mac
 from netscan.platform.base import Platform, WifiEntry
 
-__all__ = ["NetworkGuard", "PERMANENT_BLOCKED_SSIDS"]
+__all__ = ["HomeRefused", "NetworkGuard", "PERMANENT_BLOCKED_SSIDS"]
 
 log = logging.getLogger(__name__)
+
+
+class HomeRefused(ValueError):
+    """Der Router darf (noch) nicht als Heimnetz gemerkt werden – kein Sperrgrund, die API meldet 422."""
 
 _CONFIRM_HINT = "Scanne nur Netze, für die du die Erlaubnis hast – Scan erst nach Bestätigung."
 _NO_HOME = "Noch kein Heimnetz festgelegt."
@@ -59,6 +68,7 @@ class _Wifi:
     readable: bool = False
     error: str | None = None
     failed: bool = False  # wifi_status() hat eine Ausnahme geworfen
+    profiles: dict[str, str] = field(default_factory=dict)  # Adapter -> Netzwerkprofilname (nur zum Sperren)
 
     @property
     def connected(self) -> list[WifiEntry]:
@@ -100,11 +110,21 @@ class _Probe:
         except ValueError:
             return _Gateway(interface, error=f"die Gateway-Adresse für {label} ist ungültig")
         try:
-            mac = _normalize(self.platform.neighbor_mac(ip))
+            mac = _normalize(self._neighbor_mac(ip, interface))
         except Exception as exc:  # noqa: BLE001
             log.warning("ARP-Cache nicht abfragbar: %s", exc)
             return _Gateway(interface, ip=ip, error="der ARP-Cache ließ sich nicht abfragen")
         return _Gateway(interface, ip=ip, mac=mac)
+
+    def _neighbor_mac(self, ip: str, interface: str | None) -> str | None:
+        """MAC des Gateways aus dem ARP-Cache – mit Adapter nur aus dessen Einträgen (gleiche Gateway-IP an zwei
+        Adaptern). Plattformen ohne den Parameter interface werden wie bisher gefragt."""
+        if interface is None:
+            return self.platform.neighbor_mac(ip)
+        try:
+            return self.platform.neighbor_mac(ip, interface)  # type: ignore[call-arg]
+        except TypeError:
+            return self.platform.neighbor_mac(ip)
 
     def wireless_names(self, wifi: _Wifi) -> set[str]:
         """Namen aller WLAN-Adapter. Adapterliste nicht abfragbar ⇒ vorsichtshalber alle Adapter."""
@@ -141,10 +161,13 @@ class NetworkGuard:
         log.log(level, "Netz-Wächter: %s/%s für %s", result.decision, result.code, adapter.name if adapter else "-")
         return result
 
-    def remember_home(self, gateway_mac: str) -> None:
+    def remember_home(self, gateway_mac: str, adapter: Adapter | None = None) -> None:
         """Gateway-MAC als Heimnetz merken (nach ausdrücklicher Bestätigung in der Oberfläche).
 
         ValueError bei ungültiger MAC oder wenn der Router zu einem gesperrten Netz gehört.
+        HomeRefused (Unterklasse von ValueError), wenn adapter ein WLAN-Adapter ist und dessen WLAN-Name
+        gerade nicht lesbar ist: Dann ließe sich der Schul-Hotspot nicht ausschließen, und ein einmal
+        gemerkter Hotspot-Router ergäbe später allow ohne jede Rückfrage.
         """
         mac = normalize_mac(gateway_mac)  # ValueError bei Unsinn
         if _normalize(mac) is None:
@@ -152,10 +175,32 @@ class NetworkGuard:
         settings = self.settings_store.load()
         if mac in _mac_set(settings.blocked_gateway_macs):
             raise ValueError("Dieser Router gehört zu einem gesperrten Netz und kann nicht als Heimnetz gelten.")
+        if adapter is not None:
+            refusal = self._home_refusal(adapter)
+            if refusal:
+                raise HomeRefused(refusal)
         if mac in _mac_set(settings.home_gateway_macs):
             return
         self.settings_store.add_to_list("home_gateway_macs", mac)
         log.info("Heimnetz-Router gemerkt: %s", mac)
+
+    def _home_refusal(self, adapter: Adapter) -> str | None:
+        """Begründung, warum der Router hinter adapter jetzt nicht Heimnetz werden darf (None = darf)."""
+        probe = _Probe(self.platform)
+        wifi = self._wifi()
+        wireless = bool(adapter.is_wireless) or adapter.name in probe.wireless_names(wifi)
+        if not wireless:
+            return None
+        readable = wifi.readable and any(
+            e.interface == adapter.name and e.connected and e.ssid is not None for e in wifi.entries
+        )
+        if readable:
+            return None
+        return (
+            f"Das Heimnetz lässt sich über „{adapter.name}“ erst merken, wenn Windows den WLAN-Namen herausgibt "
+            "(Einstellungen › Datenschutz und Sicherheit › Standort: Standortdienste und Zugriff für Desktop-Apps an). "
+            "Sonst ließe sich der Schul-Hotspot nicht sicher ausschließen. Bis dahin „Nur diesmal scannen“ verwenden."
+        )
 
     # --- Regeln (BAUPLAN §10, in dieser Reihenfolge) ----------------------------------
     def _evaluate(self, adapter: Adapter | None) -> GuardResult:
@@ -164,10 +209,17 @@ class NetworkGuard:
         blocked_names = self._blocked_ssids(settings)
         wifi = self._wifi()
 
-        # Regel 1 + 2: irgendein verbundenes WLAN mit gesperrtem Namen (exakter Vergleich) ⇒ block
+        # Regel 1 + 2: irgendein verbundenes WLAN mit gesperrtem Namen (exakter Vergleich) ⇒ block.
+        # Dazu zählt ein Netzwerkprofil, das exakt wie ein gesperrtes WLAN heißt (Name per netsh nicht lesbar).
         hits = [e for e in wifi.connected if e.ssid is not None and e.ssid in blocked_names]
-        if hits:
-            return self._block_ssid(hits, adapter, probe)
+        named = {e.interface for e in hits}
+        profile_hits = [
+            WifiEntry(interface=name, connected=True, ssid=profile)
+            for name, profile in sorted(wifi.profiles.items())
+            if profile in blocked_names and name not in named
+        ]
+        if hits or profile_hits:
+            return self._block_ssid(hits + profile_hits, adapter, probe, {e.interface for e in profile_hits})
 
         adapter_name = adapter.name if adapter else None
         if wifi.failed:
@@ -198,7 +250,9 @@ class NetworkGuard:
                         gateway_ip=gw.ip, gateway_mac=gw.mac,
                     )
 
-        home = _mac_set(settings.home_gateway_macs)
+        # Eine gesperrte MAC kann nie Heimnetz sein – auch nicht, wenn sie (z. B. per PUT /api/settings oder vor
+        # dem Lernen) in home_gateway_macs steht.
+        home = _mac_set(settings.home_gateway_macs) - _mac_set(settings.blocked_gateway_macs)
         prefix = f"{_NO_HOME} " if not home else ""
         suffix = self._unreadable_text(unreadable) + self._doubt_text(probe.doubts)
         result_fields = {"ssid": ssid, "ssid_readable": unreadable is None, "gateway_ip": own.ip, "gateway_mac": own.mac}
@@ -230,10 +284,17 @@ class NetworkGuard:
             if home:
                 reason = f"Fremdes Netz: Der Router {own.ip} ({own.mac}) ist nicht als Heimnetz eingetragen. {_CONFIRM_HINT}"
             else:
+                if unreadable is not None and adapter is not None and adapter.is_wireless:
+                    # remember_home lehnt das hier ab (HomeRefused) – also auch nicht anbieten
+                    home_hint = (
+                        "Als Heimnetz merken lässt es sich über WLAN erst, wenn Windows den WLAN-Namen herausgibt "
+                        "(Standortberechtigung einschalten)"
+                    )
+                else:
+                    home_hint = "Ist das dein Heimnetz, bestätige mit „Das ist mein Heimnetz“"
                 reason = (
-                    f"{_NO_HOME} Router dieses Netzes: {own.ip} ({own.mac}). Ist das dein Heimnetz, bestätige mit "
-                    "„Das ist mein Heimnetz“; ein fremdes Netz scanne nur mit Erlaubnis des Netzbetreibers. "
-                    "Scan erst nach Bestätigung."
+                    f"{_NO_HOME} Router dieses Netzes: {own.ip} ({own.mac}). {home_hint}; ein fremdes Netz scanne "
+                    "nur mit Erlaubnis des Netzbetreibers. Scan erst nach Bestätigung."
                 )
             return GuardResult("confirm", "foreign_network", reason + suffix, **result_fields)
         reason = (
@@ -243,18 +304,32 @@ class NetworkGuard:
         return GuardResult("confirm", "unknown_network", reason + suffix, **result_fields)
 
     # --- Sperre über den WLAN-Namen -----------------------------------------------------
-    def _block_ssid(self, hits: list[WifiEntry], adapter: Adapter | None, probe: _Probe) -> GuardResult:
-        """block/blocked_ssid; Router-MAC jedes gesperrten WLANs merken (Fehler dabei ändern nichts)."""
+    def _block_ssid(
+        self, hits: list[WifiEntry], adapter: Adapter | None, probe: _Probe, from_profile: set[str] | None = None
+    ) -> GuardResult:
+        """block/blocked_ssid; Router-MAC jedes gesperrten WLANs merken (Fehler dabei ändern nichts).
+
+        from_profile: Adapter, deren Treffer nur aus dem Netzwerkprofilnamen stammt (WLAN-Name nicht lesbar).
+        """
+        from_profile = from_profile or set()
         gateways = [self._learn_blocked_gateway(entry, probe) for entry in hits]
         index = next((i for i, e in enumerate(hits) if adapter is not None and e.interface == adapter.name), 0)
         entry, gw = hits[index], gateways[index]
+        if entry.interface in from_profile:
+            where = (
+                f"Der WLAN-Name ist nicht lesbar, aber Windows führt die Verbindung über „{entry.interface}“ "
+                f"unter dem Netzwerkprofil „{entry.ssid}“ – das ist ein gesperrtes WLAN. "
+            )
+        else:
+            where = f"Der Rechner ist über „{entry.interface}“ mit dem WLAN „{entry.ssid}“ verbunden. "
         reason = (
-            f"Scan gesperrt: Der Rechner ist über „{entry.interface}“ mit dem WLAN „{entry.ssid}“ verbunden. "
+            f"Scan gesperrt: {where}"
             "In diesem Netz ist jeder Scan verboten – auch im Modus „nur eingetragene Geräte“. "
             "Die Sperre lässt sich nicht übergehen; trenne zuerst die Verbindung zu diesem WLAN."
         )
         return GuardResult(
-            "block", "blocked_ssid", reason, ssid=entry.ssid, ssid_readable=True, gateway_ip=gw.ip, gateway_mac=gw.mac
+            "block", "blocked_ssid", reason, ssid=entry.ssid, ssid_readable=entry.interface not in from_profile,
+            gateway_ip=gw.ip, gateway_mac=gw.mac,
         )
 
     def _learn_blocked_gateway(self, entry: WifiEntry, probe: _Probe) -> _Gateway:
@@ -267,9 +342,15 @@ class NetworkGuard:
             log.warning("Gesperrtes WLAN über %s: Router %s liegt nicht im Netz des Adapters, nicht gemerkt", entry.interface, gw.ip)
             return gw
         try:
-            if gw.mac not in _mac_set(self.settings_store.load().blocked_gateway_macs):
+            settings = self.settings_store.load()
+            if gw.mac not in _mac_set(settings.blocked_gateway_macs):
                 self.settings_store.add_to_list("blocked_gateway_macs", gw.mac)
                 log.warning("Router-MAC des gesperrten WLANs gemerkt: %s", gw.mac)
+            if gw.mac in _mac_set(settings.home_gateway_macs):
+                # Ein gesperrter Router kann nie Heimnetz sein – auch einen früheren Eintrag entfernen.
+                kept = [m for m in settings.home_gateway_macs if _normalize(m) != gw.mac]
+                self.settings_store.update(home_gateway_macs=kept)
+                log.warning("Router-MAC %s aus den Heimnetz-Routern entfernt (gehört zu einem gesperrten WLAN)", gw.mac)
         except Exception:  # noqa: BLE001 – die Sperre gilt trotzdem
             log.exception("Router-MAC des gesperrten WLANs nicht gespeichert")
         return gw
@@ -324,7 +405,13 @@ class NetworkGuard:
                     )
                 )
             error = getattr(status, "error", None)
-            return _Wifi(entries, bool(getattr(status, "readable", False)), str(error) if error else None)
+            profiles: dict[str, str] = {}
+            raw_profiles = getattr(status, "profile_names", None)
+            if isinstance(raw_profiles, dict):
+                for name, profile in raw_profiles.items():
+                    if isinstance(name, str) and name and isinstance(profile, str) and profile.strip():
+                        profiles[name] = profile.strip()  # Rand-Leerzeichen weg: sichere Richtung
+            return _Wifi(entries, bool(getattr(status, "readable", False)), str(error) if error else None, profiles=profiles)
         except Exception as exc:  # noqa: BLE001 – gilt als „nicht lesbar“, nie als „kein WLAN“
             log.warning("WLAN-Status nicht abfragbar: %s", exc)
             return _Wifi([], readable=False, error="WLAN-Status nicht abfragbar", failed=True)
@@ -373,13 +460,21 @@ class NetworkGuard:
                 names |= self._blocked_ssids(self.settings_store.load())
             except Exception:  # noqa: BLE001
                 pass
-            for entry in self.platform.wifi_status().entries:
+            status = self.platform.wifi_status()
+            for entry in status.entries:
                 if entry.connected and entry.ssid in names:
                     reason = (
                         f"Scan gesperrt: Der Rechner ist mit dem WLAN „{entry.ssid}“ verbunden. "
                         "In diesem Netz ist jeder Scan verboten. Die Sperre lässt sich nicht übergehen."
                     )
                     return GuardResult("block", "blocked_ssid", reason, ssid=entry.ssid, ssid_readable=True)
+            for profile in (getattr(status, "profile_names", None) or {}).values():
+                if isinstance(profile, str) and profile.strip() in names:
+                    reason = (
+                        f"Scan gesperrt: Windows führt eine Verbindung unter dem Netzwerkprofil „{profile.strip()}“ – "
+                        "das ist ein gesperrtes WLAN. Die Sperre lässt sich nicht übergehen."
+                    )
+                    return GuardResult("block", "blocked_ssid", reason, ssid=profile.strip(), ssid_readable=False)
         except Exception:  # noqa: BLE001
             log.debug("Notfallprüfung gescheitert", exc_info=True)
         reason = f"Die Netzprüfung ist an einem internen Fehler gescheitert – das Netz lässt sich nicht erkennen. {_CONFIRM_HINT}"

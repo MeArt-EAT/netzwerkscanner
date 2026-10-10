@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,26 @@ log = logging.getLogger(__name__)
 # sender(adapter, ips, timeout_s) -> {ip: mac}; Standard: Scapy srp() über Npcap
 ArpSender = Callable[[Adapter, list[str], float], dict[str, str]]
 
-BLOCK_SIZE = 32  # Adressen je ARP-Block
+# Blockgröße: so viele Adressen, wie bei settings.rate_pps in BLOCK_SEND_S gesendet werden (höchstens
+# MAX_BLOCK_SIZE). Scapy sendet den Block mit dem Paketabstand 1/rate_pps (srp inter) – also nie mehr als
+# rate_pps Anfragen je Sekunde und kein Stoß. Jeder srp-Aufruf wartet nach dem letzten Paket das volle Timeout;
+# wenige große Blöcke statt vieler 32er-Blöcke sparen im /24 rund zehn Sekunden.
+MAX_BLOCK_SIZE = 256
+BLOCK_SEND_S = 1.0  # Sendedauer je Block; mit Timeout ≤ 2 s bleibt der Abbruch unter 5 s
+RETRY_TIMEOUT_FACTOR = 0.5  # Wiederholungen warten kürzer: wer da ist, antwortet in Millisekunden
+MIN_RETRY_TIMEOUT_S = 0.3
 PHASE = "Gerätesuche (ARP)"
 _BROADCAST = "ff:ff:ff:ff:ff:ff"
 _MAX_TIMEOUT_S = 2.0  # harte Obergrenze je Netzoperation (Bauplan: ≤ 2 s)
+
+
+def block_size(rate_pps: float) -> int:
+    """Adressen je srp-Aufruf bei rate_pps Paketen pro Sekunde (mindestens 1, höchstens MAX_BLOCK_SIZE)."""
+    try:
+        rate = float(rate_pps)
+    except (TypeError, ValueError):
+        rate = 1.0
+    return max(1, min(MAX_BLOCK_SIZE, int(max(1.0, rate) * BLOCK_SEND_S)))
 
 
 class ArpUnavailable(RuntimeError):
@@ -111,8 +128,35 @@ def _find_iface(conf: Any, adapter: Adapter) -> Any | None:
     return None
 
 
-def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float) -> dict[str, str]:
-    """Standard-Sender: ARP-Anfragen per Broadcast über Scapy/Npcap. Wirft ArpUnavailable bei jedem Mangel."""
+def _refresh_scapy() -> None:
+    """Schnittstellen und Routen von Scapy neu einlesen (nur lesend, sendet nichts).
+
+    Scapy liest beides sonst nur beim ersten Import: Ein später eingesteckter USB-LAN-Adapter fehlte dann,
+    und nach einem Netzwechsel stimmten die gemerkten Adressen nicht mehr.
+    """
+    try:
+        from scapy.all import conf
+    except Exception:  # noqa: BLE001 – ohne Scapy meldet der Sender ArpUnavailable
+        return
+    for what, refresh in (("Schnittstellen", "ifaces"), ("Routen", "route")):
+        try:
+            target = getattr(conf, refresh, None)
+            method = getattr(target, "reload" if refresh == "ifaces" else "resync", None)
+            if callable(method):
+                method()
+        except AssertionError:
+            raise
+        except Exception:  # noqa: BLE001 – dann eben mit dem alten Stand
+            log.debug("Scapy: %s nicht neu lesbar", what, exc_info=True)
+
+
+def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float, inter: float = 0.0) -> dict[str, str]:
+    """Standard-Sender: ARP-Anfragen per Broadcast über Scapy/Npcap. Wirft ArpUnavailable bei jedem Mangel.
+
+    inter: Abstand zwischen zwei Paketen in Sekunden (1/rate_pps), damit der Block gleichmäßig verteilt
+    hinausgeht. Absender-IP und -MAC stehen ausdrücklich im Paket (Adapter des Scans) und kommen nicht aus
+    Scapys zwischengespeicherter Routentabelle.
+    """
     # Verzögerter Import: ohne Npcap muss das restliche Programm trotzdem starten.
     try:
         from scapy.all import ARP, Ether, conf, srp
@@ -129,11 +173,27 @@ def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float) -> dict[st
     if iface is None:
         raise ArpUnavailable(f"Die Netzwerkschnittstelle „{adapter.name}“ ({adapter.ipv4}) wurde von Scapy/Npcap nicht gefunden.")
     timeout = min(max(float(timeout_s), 0.1), _MAX_TIMEOUT_S)
+    gap = min(max(float(inter or 0.0), 0.0), 1.0)
+    hwsrc: str | None = None
+    for candidate in (getattr(iface, "mac", None), adapter.mac):
+        try:
+            hwsrc = normalize_mac(candidate or "")
+            break
+        except ValueError:
+            continue
+    ether_fields: dict[str, str] = {"dst": _BROADCAST}
+    arp_fields: dict[str, Any] = {"pdst": list(ips)}
+    if adapter.ipv4:
+        arp_fields["psrc"] = adapter.ipv4
+    if hwsrc:
+        ether_fields["src"] = hwsrc
+        arp_fields["hwsrc"] = hwsrc
     try:
         answered, _unanswered = srp(
-            Ether(dst=_BROADCAST) / ARP(pdst=list(ips)),
+            Ether(**ether_fields) / ARP(**arp_fields),
             iface=iface,
             timeout=timeout,
+            inter=gap,
             verbose=0,
         )
     except AssertionError:  # Programmierfehler bzw. Testsperre nicht als „nicht verfügbar“ tarnen
@@ -169,11 +229,30 @@ def _valid_replies(block: list[str], replies: dict[str, str] | None) -> dict[str
 
 
 def arp_scan(ctx: ScanContext, adapter: Adapter, hosts: list[str], sender: ArpSender | None = None) -> dict[str, str]:
-    """Fragt alle hosts per ARP ab, in Blöcken, gedrosselt (ctx.rate), abbrechbar zwischen Blöcken.
-    Wiederholt nicht antwortende Adressen settings.arp_retries mal. Rückgabe {ip: mac normalisiert}."""
-    send = sender if sender is not None else _scapy_sender
+    """Fragt alle hosts per ARP ab, in Blöcken (block_size(rate_pps)), abbrechbar zwischen Blöcken.
+    Wiederholt nicht antwortende Adressen settings.arp_retries mal (mit kürzerem Timeout).
+    Rückgabe {ip: mac normalisiert}.
+
+    Drosselung: Der Standard-Sender schickt jeden Block mit dem Paketabstand 1/rate_pps (srp inter) – so
+    gehen nie mehr als rate_pps Anfragen je Sekunde hinaus, auch nicht stoßweise. Zusätzlich dauert jeder
+    Block mindestens len(block)/rate_pps Sekunden (gilt auch für eingesetzte Sender). Der Token-Bucket
+    ctx.rate würde den gleichmäßig verteilten Block ein zweites Mal ausbremsen und bleibt Ping und TCP vorbehalten.
+    """
     settings = ctx.settings
+    rate = max(1.0, float(settings.rate_pps))
+    size = block_size(rate)
+    if sender is not None:
+        send = sender
+    else:
+        _refresh_scapy()
+        inter = 1.0 / rate
+
+        def send(a: Adapter, ips: list[str], timeout_s: float) -> dict[str, str]:
+            # über den Modulnamen, damit Tests _scapy_sender ersetzen können
+            return _scapy_sender(a, ips, timeout_s, inter=inter)
+
     retries = max(0, int(settings.arp_retries))
+    base_timeout = float(settings.arp_timeout_s)
     total = len(hosts)
     found: dict[str, str] = {}
     pending = list(hosts)
@@ -181,13 +260,16 @@ def arp_scan(ctx: ScanContext, adapter: Adapter, hosts: list[str], sender: ArpSe
     for attempt in range(retries + 1):
         if not pending:
             break
-        for start in range(0, len(pending), BLOCK_SIZE):
-            block = pending[start : start + BLOCK_SIZE]
+        timeout = base_timeout if attempt == 0 else min(base_timeout, max(MIN_RETRY_TIMEOUT_S, base_timeout * RETRY_TIMEOUT_FACTOR))
+        for start in range(0, len(pending), size):
+            block = pending[start : start + size]
             ctx.check_cancel()
-            if ctx.rate is not None:
-                ctx.rate.acquire(len(block))
-            replies = send(adapter, block, settings.arp_timeout_s)
+            started = time.monotonic()
+            replies = send(adapter, block, timeout)
             found.update(_valid_replies(block, replies))
+            rest = len(block) / rate - (time.monotonic() - started)
+            if rest > 0:
+                ctx.sleep(rest)  # Mindestdauer je Block (abbrechbar)
             if attempt == 0:
                 done += len(block)
                 ctx.progress(PHASE, done, total)

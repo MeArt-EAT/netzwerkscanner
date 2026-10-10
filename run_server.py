@@ -21,7 +21,19 @@ def _pause() -> None:
         pass
 
 
+def _quiet_console() -> object:
+    """QuickEdit im Server-Fenster abschalten: Ein Klick ins Fenster würde sonst den Markiermodus starten,
+    und dann blockiert jede Konsolenausgabe Oberfläche und Scan. Gibt die Funktion zum Zurückstellen zurück."""
+    try:
+        from netscan.platform.windows import disable_quick_edit
+
+        return disable_quick_edit()
+    except Exception:  # noqa: BLE001 – ohne diese Hilfe läuft der Server genauso
+        return None
+
+
 if __name__ == "__main__":
+    restore = _quiet_console()
     try:
         from netscan.__main__ import main
 
@@ -38,4 +50,7 @@ if __name__ == "__main__":
         print(os.path.join(os.environ.get("LOCALAPPDATA", "~"), "Netzwerkscanner", "data", "logs", "netscan.log"))
         _pause()
         code = 1
+    finally:
+        if callable(restore):
+            restore()
     sys.exit(code)

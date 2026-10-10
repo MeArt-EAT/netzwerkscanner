@@ -10,3 +10,4 @@ venv/
 /dist/
 *.egg-info/
 .claude/settings.local.json
+.claude/

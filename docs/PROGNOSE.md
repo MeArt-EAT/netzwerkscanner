@@ -1,16 +1,43 @@
 # Prognose und Istwerte – Stufe 1
 
-Prognose vom 10.10.2026, Abo Max, Modell der Leitung: Opus 5.5. Istwerte werden nach jeder Phase nachgetragen.
+Prognose vom 10.10.2026, Abo Max, Leitung: Opus 5.5. Uhrzeiten Ortszeit.
 
-| Phase | Prognose Dauer | Prognose Output-Tokens | Ist Dauer | Ist Kontingent (5-h-Fenster) |
-|---|---|---|---|---|
-| 1 Bauplan, Gerüst, Umgebung | 25–40 min | 40–60 k | ~20 min (13:50–14:10) | 0 % → 1 % |
-| 2 Module bauen (6 parallel) | 45–75 min | 180–300 k | Start 14:12 | |
-| 3 Zusammenbau, Gesamttest | 30–60 min | 40–70 k | | |
-| 4 Prüfung und Nachbesserung | 30–45 min | 50–90 k | | |
-| 5 Endabnahme, README, Versionsmarke | 10–20 min | 15–30 k | | |
-| **Summe** | **2½–4 h** | **0,33–0,55 M** | | |
+| Phase | Prognose Dauer | Ist Dauer | Ist Kontingent (5-h-Fenster) |
+|---|---|---|---|
+| 1 Bauplan, Gerüst, Umgebung | 25–40 min | 20 min (13:50–14:10) | 0 % → 1 % |
+| 2 Module bauen (6 Agenten parallel) | 45–75 min | 35 min (14:12–14:47) | 1 % → 6 % |
+| 3 Zusammenbau, Gesamttest, Demo im Browser | 30–60 min | 18 min | 6 % → 7 % |
+| 4 Prüfung (3 Prüfer, 3 Gegenprüfer, 1 Nachbesserung) | 30–45 min | **94 min** | 7 % → 15 % |
+| 5 Endabnahme, README, Versionsmarke | 10–20 min | 15 min | 15 % |
+| **Summe** | **2½–4 h** | **≈ 3 h** | **15 %** (Woche: 2 % → 6 %) |
 
-Umfang: Prognose 3.000–4.000 Zeilen inkl. Tests. Ist: …
+Tokens: Die Agenten haben zusammen rund 4,0 M Tokens umgesetzt (Phase 2: 1,73 M, Phase 4: 2,25 M).
+Das sind überwiegend gelesene Tokens, meist aus dem Zwischenspeicher. Wie viele davon Output waren, zeigt das
+Werkzeug nicht getrennt an. Deshalb ist die Output-Prognose (0,33–0,55 M) nicht direkt nachprüfbar.
 
-Gesamtprojekt (grob): Stufe 2 1½–2½ h, Stufe 3 2–3½ h, gesamt 6–10 h Rechenzeit, 0,85–1,4 M Output-Tokens.
+## Umfang – Prognose deutlich verfehlt
+
+| | Prognose | Ist |
+|---|---|---|
+| Programm (Python) | ~2.000 | 7.639 |
+| Oberfläche (HTML/JS/CSS) | ~900 | 3.020 |
+| Tests | ~900 | 10.279 (973 Tests) |
+| Start/CI | – | 185 |
+| **Gesamt** | **3.000–4.000** | **21.123** |
+
+Ursache: Die Agenten haben deutlich mehr Fehlerfälle abgefangen und getestet als angenommen, etwa
+Plattformausfälle, Sprachvarianten von netsh/ping, Sicherheitsprüfungen der API und Abbruch in jedem Modul. Dazu
+kamen gut 1.100 Zeilen aus der Prüfrunde (26 bestätigte Befunde, jeder mit Regressionstest). Die Zeit hat
+trotzdem gereicht, weil die Arbeit parallel lief.
+
+## Lehre für die Prognose von Stufe 2 und 3
+
+- Zeit: Bau und Zusammenbau lagen unter der Prognose, die Prüfrunde dauerte etwa doppelt so lang wie geplant.
+  Künftig für die Prüfung 60–100 min ansetzen.
+- Kontingent: Eine Stufe dieser Größe braucht im Max-Abo etwa 15 % des 5-Stunden-Fensters und 4–5 % der Woche.
+- Umfang: Faktor ~5 auf die bisherige Zeilenschätzung; Tests machen etwa die Hälfte aus.
+
+| Stufe | Dauer (neu geschätzt) | 5-h-Fenster | Woche |
+|---|---|---|---|
+| 2 Überwachung | 2–2½ h | ~10 % | ~3 % |
+| 3 Sicherheit und SNMP | 3–4 h | ~15–20 % | ~5 % |

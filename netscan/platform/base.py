@@ -63,6 +63,10 @@ class WifiStatus:
     entries: list[WifiEntry] = field(default_factory=list)
     readable: bool = True  # False = Abfrage ganz gescheitert (z. B. Standortberechtigung fehlt)
     error: str | None = None
+    # Schnittstelle -> Name des Netzwerkprofils (Windows: Get-NetConnectionProfile, braucht keine
+    # Standortberechtigung; bei WLAN ist das beim Anlegen die SSID). Nur ein Hinweis, wenn die SSID
+    # nicht lesbar ist: Der Wächter nutzt ihn ausschließlich zum Sperren, nie zum Freigeben.
+    profile_names: dict[str, str] = field(default_factory=dict)
 
     @property
     def connected(self) -> list[WifiEntry]:
@@ -93,7 +97,9 @@ class Platform(Protocol):
         """IP -> MAC (normalisiert) aus dem ARP-Cache des Systems. Sendet keine Pakete."""
         ...
 
-    def neighbor_mac(self, ip: str) -> str | None:
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None:
+        """MAC zu ip aus dem ARP-Cache. Mit interface nur der Eintrag dieser Schnittstelle
+        (gleiche IP an zwei Adaptern, z. B. Ethernet und Hotspot-WLAN). Sendet keine Pakete."""
         ...
 
     def ping(self, ip: str, timeout_ms: int) -> PingResult:

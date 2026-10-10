@@ -198,6 +198,11 @@
     return isNumber(n) ? n.toLocaleString("de-DE") : "–";
   }
 
+  /** Anzahl: Liste ⇒ Länge, Zahl bleibt Zahl, sonst unverändert (wird dann nicht angezeigt). */
+  function countOf(value) {
+    return Array.isArray(value) ? value.length : value;
+  }
+
   /** Text und Tonart für das Ende eines Auftrags (Ereignis job.finished). */
   function describeResult(res) {
     const kind = res && res.kind;
@@ -212,8 +217,11 @@
           if (isNumber(sum.devices)) detail.push(`${sum.devices} ${plural(sum.devices, "Gerät", "Geräte")}`);
           if (isNumber(sum.new)) detail.push(`${sum.new} neu`);
         } else if (kind === "deep_scan") {
-          if (isNumber(sum.open_ports)) detail.push(`${sum.open_ports} ${plural(sum.open_ports, "offener Port", "offene Ports")}`);
-          if (isNumber(sum.new_ports)) detail.push(`${sum.new_ports} neu`);
+          // Die Pipeline liefert Listen der Portnummern (BAUPLAN §9), ältere Stände Zahlen – beides zählen.
+          const open = countOf(sum.open_ports);
+          const fresh = countOf(sum.new_ports);
+          if (isNumber(open)) detail.push(`${open} ${plural(open, "offener Port", "offene Ports")}`);
+          if (isNumber(fresh)) detail.push(`${fresh} neu`);
         } else if (kind === "oui_update") {
           if (isNumber(sum.entries)) detail.push(`${formatNumber(sum.entries)} Einträge`);
         }
@@ -286,6 +294,39 @@
       parts.push(`Router: ${guard.gateway_ip}${guard.gateway_mac ? " (" + guard.gateway_mac + ")" : ""}`);
     }
     return parts.join(" · ");
+  }
+
+  /** Roter Zusatz, solange Windows den WLAN-Namen nicht herausgibt: die Hotspot-Sperre ist dann eingeschränkt. */
+  function guardWarning(guard) {
+    if (!guard || guard.ssid_readable !== false || guard.decision === "block") return "";
+    return (
+      "Hotspot-Sperre eingeschränkt: Windows gibt den WLAN-Namen nicht heraus (Standortfreigabe fehlt). " +
+      "Der Schul-Hotspot wird dann nur am Windows-Profilnamen oder an einer früher gemerkten Router-Adresse erkannt. " +
+      "Abhilfe: Einstellungen › Datenschutz und Sicherheit › Standort – Standortdienste und Zugriff für Desktop-Apps an."
+    );
+  }
+
+  /** „Das ist mein Heimnetz“ nur bei confirm mit bekannter Router-MAC – und nie über WLAN ohne lesbaren WLAN-Namen
+   *  (der Server lehnt das ab: 422). Unbekannter Adapter zählt vorsichtshalber als WLAN. */
+  function homeButtonAllowed(guard, adapter) {
+    if (!guard || guard.decision !== "confirm" || !guard.gateway_mac) return false;
+    if (guard.ssid_readable === false && !(adapter && adapter.is_wireless === false)) return false;
+    return true;
+  }
+
+  /** Nach der Antwort auf „Abbrechen“: nur dann „wird abgebrochen“ zeigen, wenn derselbe Auftrag noch läuft.
+   *  (job.finished kann über den WebSocket schon vor der HTTP-Antwort angekommen sein.) */
+  function shouldMarkCancelling(job, jobIdAtClick) {
+    if (!job || job.state !== "running") return false;
+    return !jobIdAtClick || !job.job_id || job.job_id === jobIdAtClick;
+  }
+
+  /** job.progress übernehmen? Nein für Nachzügler beendeter Aufträge und für Ereignisse eines anderen Auftrags. */
+  function acceptProgress(job, data, finishedIds) {
+    const id = data && data.job_id;
+    if (id && Array.isArray(finishedIds) && finishedIds.includes(id)) return false;
+    if (job && job.state !== "idle" && job.job_id && id && job.job_id !== id) return false;
+    return true;
   }
 
   /** Request-Body für POST /api/scan. */
@@ -429,6 +470,7 @@
       module.exports = {
         API, ipKey, compareDevices, defaultSortDir, matchesFilter, formatDuration, formatTime, formatNumber,
         describeResult, apiMessage, truncate, guardTitle, guardDetails, buildScanRequest, buildDevicePatch,
+        guardWarning, homeButtonAllowed, shouldMarkCancelling, acceptProgress, countOf,
         diffSettings, ringLayout, freeSlot, planMap, nodeLabel, nodeSpec, iconSvg, iconUri, macPath, plural, categoryLabel,
         CATEGORY_LIST, CATEGORY_LABELS, RISK_LABELS, RISK_ORDER, JOB_KIND_LABELS, SETTINGS_EDITABLE, HUB_ID,
       };
@@ -450,6 +492,8 @@
     settings: null,
     settingsWork: null,
     job: idleJob(),
+    finishedJobIds: [], // zuletzt beendete Aufträge: späte job.progress-Ereignisse dieser Aufträge verwerfen
+    jobWatch: null, // Zeitgeber: Auftragsstatus nachfragen, solange ein Auftrag läuft (Selbstheilung)
     lastResult: null,
     starting: false,
     guard: null,
@@ -661,6 +705,31 @@
     $("btn-oui-update").disabled = busy;
     updateDeepButton();
     renderGuardButtons();
+    watchJob(busy);
+  }
+
+  /** Solange ein Auftrag läuft, alle 4 s beim Server nachfragen. Heilt eine hängende Anzeige, wenn ein
+   *  job.finished verpasst wurde oder sich mit einer Antwort überholt hat. Geheilt wird nur Richtung „fertig“
+   *  bzw. bei einem anderen Auftrag – eine verspätete „läuft noch“-Antwort ändert nichts. */
+  function watchJob(busy) {
+    if (busy && !state.jobWatch) {
+      state.jobWatch = setInterval(async () => {
+        if (!jobBusy() || state.starting) return;
+        const res = await api("GET", API.job);
+        if (!res.ok || !res.data || typeof res.data !== "object" || !jobBusy()) return;
+        const other = res.data.job_id && state.job.job_id && res.data.job_id !== state.job.job_id;
+        if (res.data.state === "idle" || other) {
+          applyJobStatus(res.data);
+          if (res.data.state === "idle") {
+            loadDevices();
+            refreshStatus();
+          }
+        }
+      }, 4000);
+    } else if (!busy && state.jobWatch) {
+      clearInterval(state.jobWatch);
+      state.jobWatch = null;
+    }
   }
 
   let renderJobQueued = false;
@@ -771,16 +840,19 @@
 
   async function cancelScan() {
     if (state.job.state !== "running") return;
+    const jobId = state.job.job_id;
     const res = await api("POST", API.cancel, {});
     if (!res.ok) {
       toast(apiMessage(res.data, "Abbrechen nicht möglich."), "error");
     } else if (res.data && res.data.cancelled === false) {
       toast("Es läuft gerade nichts, das man abbrechen könnte.", "info");
       refreshJob();
-    } else {
+    } else if (shouldMarkCancelling(state.job, jobId)) {
       state.job.state = "cancelling";
       updateControls();
       renderJob();
+    } else {
+      refreshJob(); // job.finished kam schon vor der Antwort – Zustand vom Server holen statt „wird abgebrochen“
     }
   }
 
@@ -884,6 +956,8 @@
     if (guard.reason) body.append(h("span", { class: "guard-reason", text: guard.reason }));
     const details = guardDetails(guard);
     if (details) body.append(h("span", { class: "guard-details", text: details }));
+    const warning = guardWarning(guard);
+    if (warning) body.append(h("span", { class: "guard-warning", text: warning }));
     if (tone === "confirm" && state.guardContext.type === "deep") {
       const dev = state.devices.get(state.guardContext.mac);
       body.append(h("span", { class: "guard-details", text: "Betrifft: Tiefenscan von " + (dev ? dev.display_name : state.guardContext.mac) }));
@@ -895,15 +969,29 @@
       actions.append(
         h("button", { type: "button", class: "btn", dataset: { role: "once" }, text: "Nur diesmal scannen", on: { click: confirmOnce } })
       );
-      // „Heimnetz merken“ geht nur mit bekannter Router-MAC (sonst gäbe es nichts zu merken)
+      // „Heimnetz merken“ geht nur mit bekannter Router-MAC (sonst gäbe es nichts zu merken) und über WLAN nur
+      // mit lesbarem WLAN-Namen (sonst ließe sich der Schul-Hotspot nicht ausschließen)
       if (state.guardContext.type !== "deep" && guard.gateway_mac) {
-        actions.append(
-          h("button", { type: "button", class: "btn", dataset: { role: "home" }, text: "Das ist mein Heimnetz", on: { click: confirmHome } })
-        );
+        if (homeButtonAllowed(guard, currentAdapter())) {
+          actions.append(
+            h("button", { type: "button", class: "btn", dataset: { role: "home" }, text: "Das ist mein Heimnetz", on: { click: confirmHome } })
+          );
+        } else {
+          body.append(
+            h("span", {
+              class: "guard-details",
+              text: "„Das ist mein Heimnetz“ geht über WLAN erst, wenn Windows den WLAN-Namen herausgibt (Standortfreigabe).",
+            })
+          );
+        }
       }
       band.append(actions);
     }
     renderGuardButtons();
+  }
+
+  function currentAdapter() {
+    return state.adapters.find((a) => a.name === state.adapterName) || null;
   }
 
   function renderGuardButtons() {
@@ -1267,9 +1355,11 @@
     if (!btn) return;
     const d = state.devices.get(state.selectedMac);
     const blocked = !!(state.guard && state.guard.decision === "block");
-    btn.disabled = !d || jobBusy() || state.starting || blocked;
+    const offline = !!(d && d.online === false);
+    btn.disabled = !d || offline || jobBusy() || state.starting || blocked;
     const hint = $("d-deep-hint");
     if (blocked) hint.textContent = "Dieses Netz ist gesperrt, kein Tiefenscan möglich.";
+    else if (offline) hint.textContent = "Das Gerät war im letzten Scan nicht erreichbar. Erst neu scannen – unter der alten Adresse könnte jetzt ein anderes Gerät antworten.";
     else if (jobBusy()) hint.textContent = "Es läuft gerade ein anderer Auftrag.";
     else if (d && d.port_scan_excluded) hint.textContent = "Dieses Gerät ist vom Port-Scan ausgenommen. Ein Tiefenscan sendet trotzdem viele Verbindungsanfragen an das Gerät.";
     else hint.textContent = "Prüft alle Ports 1–1024 dieses einen Geräts. Das sind viele Verbindungsanfragen; empfindliche Geräte können darauf reagieren.";
@@ -1950,6 +2040,7 @@
   }
 
   function onJobProgress(data) {
+    if (!acceptProgress(state.job, data, state.finishedJobIds)) return; // Nachzügler eines beendeten Auftrags
     if (state.job.state === "idle") {
       state.job = Object.assign(idleJob(), { job_id: data.job_id || null, state: "running" });
     }
@@ -1963,6 +2054,10 @@
   }
 
   function onJobFinished(data) {
+    if (data.job_id) {
+      state.finishedJobIds.push(data.job_id);
+      if (state.finishedJobIds.length > 20) state.finishedJobIds.shift();
+    }
     state.job = idleJob();
     state.lastResult = describeResult(data);
     const tone = state.lastResult.tone;

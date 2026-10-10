@@ -48,9 +48,9 @@ class FlakyPlatform(FakePlatform):
         self._maybe_fail("default_gateway")
         return super().default_gateway(adapter_name)
 
-    def neighbor_mac(self, ip: str) -> str | None:
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None:
         self._maybe_fail("neighbor_mac")
-        return super().neighbor_mac(ip)
+        return super().neighbor_mac(ip, interface)
 
     def ping(self, ip: str, timeout_ms: int) -> PingResult:
         raise AssertionError("Der Wächter darf nicht pingen")

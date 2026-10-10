@@ -87,7 +87,13 @@ class JobRunner:
             self._status.state = "cancelling"
             self._cancel.cancel()
             job_id = self._status.job_id
-        self._bus.publish("job.progress", {"job_id": job_id, "phase": "Abbruch", "done": 0, "total": 0, "message": "Wird abgebrochen …"}, job_id=job_id)
+            # Unter der Sperre veröffentlichen: _run braucht sie zum Zurücksetzen, also kommt dieses Ereignis
+            # immer vor job.finished desselben Auftrags (sonst sähe die Oberfläche einen Geister-Auftrag).
+            self._bus.publish(
+                "job.progress",
+                {"job_id": job_id, "phase": "Abbruch", "done": 0, "total": 0, "message": "Wird abgebrochen …"},
+                job_id=job_id,
+            )
         return True
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -111,7 +117,9 @@ class JobRunner:
         try:
             summary = fn(ctx) or {}
             if ctx.cancel.cancelled:
-                result = "cancelled"
+                # fn ist regulär fertig geworden (Änderungen sind gespeichert) – das Ergebnis ist „abgeschlossen“,
+                # nicht „abgebrochen“. Abgebrochen heißt: ScanCancelled wurde ausgelöst.
+                ctx.log("Der Abbruch kam zu spät – der Auftrag war schon fertig und ist vollständig ausgeführt.", "warning")
         except ScanCancelled:
             result = "cancelled"
             ctx.log("Auftrag abgebrochen.", "warning")

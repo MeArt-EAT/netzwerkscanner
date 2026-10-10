@@ -16,6 +16,9 @@ VIRTUAL_PATTERNS: tuple[str, ...] = (
     "hyper-v", "vethernet", "wsl", "virtualbox", "vmware", "loopback", "tap-", "tap adapter",
     "vpn", "wireguard", "tailscale", "zerotier", "openvpn", "npcap loopback", "bluetooth",
     "teredo", "isatap", "docker", "wan miniport",
+    # Versteckte Windows-Adapter (mobiler Hotspot/Wi-Fi Direct, Shrew-Soft-VPN …): Beschreibung „… Virtual
+    # Adapter“, Anzeigename „LAN-Verbindung* 10“ bzw. „Local Area Connection* 10“ (Stern = von Windows erzeugt).
+    "wi-fi direct", "wifi direct", "virtual adapter", "verbindung*", "connection*",
 )
 
 

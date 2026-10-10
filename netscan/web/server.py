@@ -36,10 +36,11 @@ from starlette.websockets import WebSocketDisconnect
 
 from netscan import __version__, config
 from netscan.config import DEFAULT_PORT
+from netscan.core.guard import HomeRefused
 from netscan.core.jobs import JobBusyError
 from netscan.core.models import CATEGORIES, Adapter, Device, GuardResult, ScanRequest, normalize_mac, utc_now_iso
 from netscan.core.services import Services, build_services
-from netscan.net import adapters, arp, oui
+from netscan.net import adapters, arp, classify, oui
 from netscan.scan import pipeline
 from netscan.web import export
 
@@ -256,7 +257,9 @@ def _guard_gate(svc: Services, adapter: Adapter, confirm_foreign: bool, remember
             return _error(428, f"Bestätigung erforderlich: {guard.reason}", guard=guard.to_dict())
         if remember_home and guard.gateway_mac:
             try:
-                svc.guard.remember_home(guard.gateway_mac)
+                svc.guard.remember_home(guard.gateway_mac, adapter=adapter)
+            except HomeRefused as exc:  # z. B. WLAN-Name nicht lesbar: nicht merken, nichts starten
+                return _error(422, str(exc), guard=guard.to_dict())
             except ValueError as exc:  # z. B. Router eines gesperrten Netzes: nie als Heimnetz merken, kein Scan
                 return _error(423, f"Scan gesperrt: {exc}", guard=guard.to_dict())
         return None
@@ -317,8 +320,11 @@ def _export_meta(svc: Services, devices: list[Device]) -> dict[str, Any]:
     }
 
 
-def _validate_settings(body: dict[str, Any]) -> dict[str, Any]:
-    """Prüft einen PUT-Body vollständig (alles oder nichts). Fehler ⇒ HTTPException 400."""
+def _validate_settings(body: dict[str, Any], blocked_macs: Any = ()) -> dict[str, Any]:
+    """Prüft einen PUT-Body vollständig (alles oder nichts). Fehler ⇒ HTTPException 400.
+
+    blocked_macs: gelernte Router-MACs gesperrter Netze – die dürfen nie Heimnetz werden (BAUPLAN §10).
+    """
     known = set(config.Settings().to_dict())
     changes: dict[str, Any] = {}
     for key, value in body.items():
@@ -337,7 +343,7 @@ def _validate_settings(body: dict[str, Any]) -> dict[str, Any]:
         elif key == "blocked_ssids_extra":
             changes[key] = _clean_ssids(value)
         elif key == "home_gateway_macs":
-            changes[key] = _clean_macs(value)
+            changes[key] = _clean_macs(value, blocked_macs)
         else:
             changes[key] = _clean_categories(value)
     return changes
@@ -372,14 +378,25 @@ def _clean_ssids(value: Any) -> list[str]:
     return out
 
 
-def _clean_macs(value: Any) -> list[str]:
+def _clean_macs(value: Any, blocked_macs: Any = ()) -> list[str]:
+    """Heimnetz-Router: nur Unicast-MACs, nie eine gesperrte (gleiche Regel wie remember_home)."""
     items = _as_list("home_gateway_macs", value)
+    blocked: set[str] = set()
+    for raw in blocked_macs or ():
+        try:
+            blocked.add(normalize_mac(raw))
+        except (ValueError, TypeError, AttributeError):
+            continue
     out: list[str] = []
     for item in items:
         try:
             mac = normalize_mac(item)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise HTTPException(400, f"Keine gültige MAC-Adresse: {item!r}") from exc
+        if mac == "00:00:00:00:00:00" or int(mac[:2], 16) & 1:
+            raise HTTPException(400, f"{mac} ist keine Router-Adresse (Null-, Broadcast- oder Multicast-MAC).")
+        if mac in blocked:
+            raise HTTPException(400, f"{mac} gehört zu einem gesperrten Netz und kann nie Heimnetz werden.")
         if mac not in out:
             out.append(mac)
     return out
@@ -498,6 +515,15 @@ def patch_device(mac: str, body: DevicePatch, svc: Svc) -> dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(404, "Gerät nicht gefunden.") from exc
+    if "category" in fields and fields["category"] in ("auto", None) and device.category_source == "auto":
+        # Zurück auf „Automatisch“: sofort neu einordnen, damit kein alter Nutzerwert („vom Nutzer festgelegt“)
+        # stehen bleibt – sonst richtete sich z. B. die Ausnahme vom Port-Scan bis zum nächsten Scan danach.
+        try:
+            category, reason = classify.classify(device)
+            svc.inventory.set_auto_category(device.mac, category, reason)
+            device = svc.inventory.get(device.mac) or device
+        except Exception:  # noqa: BLE001 – die Änderung selbst ist gespeichert
+            log.warning("Neue Einordnung für %s fehlgeschlagen", device.mac, exc_info=True)
     svc.bus.publish("device.updated", {"device": device.to_dict()})
     svc.bus.publish("devices.changed", {})
     return device.to_dict()
@@ -511,6 +537,20 @@ def deep_scan(mac: str, svc: Svc, body: DeepScanBody | None = None) -> JSONRespo
     adapter = _adapter_for_device(svc, device)
     if adapter is None:
         raise HTTPException(404, "Kein Netzwerkadapter für dieses Gerät gefunden.")
+    if not _network_contains(adapter, device.ip):
+        # last_adapter (BAUPLAN §12), aber die Geräte-IP liegt nicht in dessen Netz: Die Pipeline würde den
+        # Auftrag ohnehin ablehnen – also nicht erst eine Freigabe für ein fremdes Netz erfragen.
+        return _error(
+            422,
+            f"Das Gerät ({device.ip}) liegt in keinem Netz eines verbundenen Adapters "
+            f"(„{adapter.name}“: {adapter.network}) – Tiefenscan nicht möglich.",
+        )
+    if not device.online:
+        # Unter der alten Adresse kann inzwischen ein anderes Gerät antworten (DHCP).
+        return _error(
+            422,
+            f"{device.display_name} war im letzten Scan nicht erreichbar – bitte zuerst neu scannen, dann Tiefenscan.",
+        )
 
     denied = _guard_gate(svc, adapter, bool(body and body.confirm_foreign), False)
     if denied is not None:
@@ -576,7 +616,7 @@ def get_settings(svc: Svc) -> dict[str, Any]:
 
 @router.put("/settings")
 def put_settings(svc: Svc, body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
-    changes = _validate_settings(body)
+    changes = _validate_settings(body, svc.settings.load().blocked_gateway_macs)
     try:
         return svc.settings.update(**changes).to_dict()
     except KeyError as exc:
@@ -589,7 +629,8 @@ def put_settings(svc: Svc, body: Annotated[dict[str, Any], Body()]) -> dict[str,
 def update_oui(svc: Svc) -> JSONResponse:
     def work(ctx: Any) -> dict[str, Any]:
         ctx.log("Herstellerliste wird von der IEEE geladen …")
-        count = oui.update_from_ieee(svc.data_dir)
+        # Mit ctx abbrechbar – auch direkt vor dem Ersetzen der Datei; ein Abbruch ändert die Liste nie.
+        count = oui.update_from_ieee(svc.data_dir, ctx=ctx)
         svc.oui = oui.OuiDb.load(svc.data_dir)
         info = {"entries": svc.oui.entries, "source": svc.oui.source}
         ctx.log(f"Herstellerliste aktualisiert: {info['entries']} Einträge.")
@@ -776,7 +817,9 @@ def run(port: int = DEFAULT_PORT, open_browser: bool = False, services: Services
         sys.exit(2)
 
     app = create_app(services, port=port)
-    server = uvicorn.Server(uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info"))
+    # access_log=False: keine Zeile je Anfrage aus der Ereignisschleife auf die Konsole. Im klassischen
+    # Konsolenfenster blockiert jede Ausgabe, solange dort Text markiert ist – dann stünde die Oberfläche still.
+    server = uvicorn.Server(uvicorn.Config(app, host=BIND_HOST, port=port, log_level="info", access_log=False))
 
     stop = threading.Event()
     opener: threading.Thread | None = None

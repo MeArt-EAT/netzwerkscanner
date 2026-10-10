@@ -63,7 +63,7 @@ class Settings:
     ping_workers: int = 32
     port_timeout_ms: int = 700
     port_workers: int = 64
-    arp_timeout_s: float = 1.0  # je ARP-Block; /24 = 8 Blöcke à 32, mit 1 Wiederholung höchstens ≈ 16 s
+    arp_timeout_s: float = 1.0  # Warten je ARP-Block; /24 bei 200 Paketen/s: 2 Blöcke, mit Wiederholung (0,5 s) ≈ 5–6 s
     arp_retries: int = 1
     names_timeout_s: float = 2.0
     mdns_timeout_s: float = 3.0

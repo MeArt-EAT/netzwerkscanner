@@ -258,10 +258,21 @@ def _read_banner(sock: socket.socket, timeout_s: float) -> str | None:
     return _clean_banner(data)
 
 
-def probe_port(ip: str, port: int, timeout_s: float, read_banner: bool = False) -> tuple[bool, str | None]:
+class SourceAddressGone(RuntimeError):
+    """Die Absenderadresse (IPv4 des Adapters) gibt es nicht mehr – z. B. nach einem Netzwechsel.
+    Dann wird nichts gesendet; scan_ports bricht ab, statt alle Ports als „geschlossen“ zu melden."""
+
+
+def probe_port(
+    ip: str, port: int, timeout_s: float, read_banner: bool = False, source_ip: str | None = None
+) -> tuple[bool, str | None]:
     """Ein TCP-Connect-Versuch. (offen, Banner). Banner nur passiv lesen (nichts senden), höchstens
     200 Zeichen, kurze Zeitgrenze. Tests ersetzen diese Funktion (Portübersetzung auf Sim-Ports) –
-    scan_ports muss sie daher über den Modulnamen aufrufen, nicht über eine lokale Kopie."""
+    scan_ports muss sie daher über den Modulnamen aufrufen, nicht über eine lokale Kopie.
+
+    source_ip: an diese Adresse (IPv4 des Scan-Adapters) binden. Dann geht die Verbindung nur über diesen
+    Adapter hinaus; ist die Adresse nach einem Netzwechsel weg, scheitert das Binden (SourceAddressGone),
+    statt über die Standardroute in ein anderes Netz zu senden."""
     target = _ipv4_target(ip)
     if target is None or not _valid_port(port):
         return (False, None)
@@ -270,6 +281,11 @@ def probe_port(ip: str, port: int, timeout_s: float, read_banner: bool = False) 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
+        if source_ip is not None:
+            try:
+                sock.bind((source_ip, 0))
+            except OSError as exc:
+                raise SourceAddressGone(f"Absenderadresse {source_ip} nicht verfügbar: {exc}") from exc
         if sock.connect_ex((target, port)) != 0:
             return (False, None)
         banner = _read_banner(sock, min(BANNER_TIMEOUT_S, timeout)) if read_banner else None
@@ -304,10 +320,15 @@ def _plan_pairs(ctx: ScanContext, targets: dict[str, list[int]]) -> list[tuple[s
     return pairs
 
 
-def scan_ports(ctx: ScanContext, targets: dict[str, list[int]]) -> dict[str, list[PortResult]]:
+def scan_ports(
+    ctx: ScanContext, targets: dict[str, list[int]], *, source_ip: str | None = None
+) -> dict[str, list[PortResult]]:
     """TCP-Connect-Scan aller (ip, port)-Paare in einem gemeinsamen Pool (parallel_map,
     settings.port_workers, settings.port_timeout_ms, gedrosselt) über probe_port(). Banner nur für
-    BANNER_PORTS. Rückgabe {ip: [offene Ports, sortiert]} für jede ip aus targets."""
+    BANNER_PORTS. Rückgabe {ip: [offene Ports, sortiert]} für jede ip aus targets.
+
+    source_ip: Absenderadresse (IPv4 des Scan-Adapters), siehe probe_port. Verschwindet sie während des
+    Scans, endet scan_ports mit SourceAddressGone – nie mit lauter „geschlossenen“ Ports."""
     ctx.check_cancel()
     results: dict[str, list[PortResult]] = {ip: [] for ip in targets}
     pairs = _plan_pairs(ctx, targets)
@@ -317,11 +338,20 @@ def scan_ports(ctx: ScanContext, targets: dict[str, list[int]]) -> dict[str, lis
     timeout_s = _clamp_timeout(ctx.settings.port_timeout_ms / 1000)
     workers = max(1, int(ctx.settings.port_workers))
     reported = 0
+    gone: list[SourceAddressGone] = []
 
-    def work(pair: tuple[str, int]) -> tuple[bool, str | None]:
+    def work(pair: tuple[str, int]) -> tuple[bool, str | None] | None:
+        if gone:
+            return None  # Absenderadresse weg: nichts mehr versuchen
         ip, port = pair
-        # Aufruf über den Modulnamen (globale Suche zur Laufzeit), damit Tests probe_port ersetzen können.
-        return probe_port(ip, port, timeout_s, port in BANNER_PORTS)
+        try:
+            # Aufruf über den Modulnamen (globale Suche zur Laufzeit), damit Tests probe_port ersetzen können.
+            if source_ip is None:
+                return probe_port(ip, port, timeout_s, port in BANNER_PORTS)
+            return probe_port(ip, port, timeout_s, port in BANNER_PORTS, source_ip=source_ip)
+        except SourceAddressGone as exc:
+            gone.append(exc)
+            return None
 
     def on_result(_pair: tuple[str, int], _res: object, done: int, total: int) -> None:
         nonlocal reported
@@ -330,6 +360,8 @@ def scan_ports(ctx: ScanContext, targets: dict[str, list[int]]) -> dict[str, lis
             ctx.progress(PROGRESS_PHASE, done, total, f"{done} von {total} Port-Prüfungen")
 
     outcome = parallel_map(ctx, work, pairs, workers, rate=True, on_result=on_result)
+    if gone:
+        raise gone[0]
     for (ip, port), res in outcome:
         if not res:
             continue

@@ -18,6 +18,13 @@ from tests.fakes import FakeArpSender, make_adapter
 NET = "192.168.178"
 
 
+@pytest.fixture(autouse=True)
+def blocks_of_32(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Die Tests dieser Datei rechnen mit Blöcken zu höchstens 32 Adressen. Die echte Blockgröße richtet sich
+    nach rate_pps (arp.block_size, siehe tests/test_review_arp.py) – hier bleibt sie klein und übersichtlich."""
+    monkeypatch.setattr(arp, "MAX_BLOCK_SIZE", 32)
+
+
 def make_hosts(first: int = 1, last: int = 254) -> list[str]:
     return [f"{NET}.{i}" for i in range(first, last + 1)]
 
@@ -102,14 +109,18 @@ def test_scan_with_no_hosts_sends_nothing(make_ctx) -> None:  # type: ignore[no-
 def test_scan_uses_scapy_sender_by_default(make_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls: list[list[str]] = []
 
-    def fake_default(adapter, ips, timeout_s):  # type: ignore[no-untyped-def]
+    inters: list[float] = []
+
+    def fake_default(adapter, ips, timeout_s, inter=0.0):  # type: ignore[no-untyped-def]
         calls.append(list(ips))
+        inters.append(inter)
         return {ips[0]: "aa:bb:cc:00:00:01"}
 
     monkeypatch.setattr(arp, "_scapy_sender", fake_default)
     ctx = make_ctx(arp_retries=0, rate_pps=1000)
     assert arp_scan(ctx, make_adapter(), make_hosts(1, 3)) == {f"{NET}.1": "aa:bb:cc:00:00:01"}
     assert calls == [make_hosts(1, 3)]
+    assert inters == [pytest.approx(1 / 1000)]  # Paketabstand aus rate_pps
 
 
 def test_scan_passes_arp_unavailable_through(make_ctx) -> None:  # type: ignore[no-untyped-def]
@@ -225,11 +236,15 @@ def test_final_log_names_the_count(make_ctx) -> None:  # type: ignore[no-untyped
 # --- Drosselung und Abbruch ----------------------------------------------------------
 
 
-def test_rate_limiter_is_used_per_block(make_ctx) -> None:  # type: ignore[no-untyped-def]
+def test_rate_limiter_is_not_charged_twice(make_ctx) -> None:  # type: ignore[no-untyped-def]
+    # Gedrosselt wird über den Paketabstand im Block (srp inter = 1/rate_pps) und eine Mindestdauer je Block.
+    # Den Token-Bucket zusätzlich zu belasten, würde jeden Block ein zweites Mal ausbremsen.
     ctx = make_ctx(arp_retries=0)
     ctx.rate = CountingRate()  # type: ignore[assignment]
-    arp_scan(ctx, make_adapter(), make_hosts(), FakeArpSender({}))
-    assert ctx.rate.calls == [32] * 7 + [30]  # type: ignore[union-attr]
+    sender = FakeArpSender({})
+    arp_scan(ctx, make_adapter(), make_hosts(), sender)
+    assert ctx.rate.calls == []  # type: ignore[union-attr]
+    assert [len(c) for c in sender.calls] == [32] * 7 + [30]
 
 
 def test_rate_limiter_slows_the_scan_down(make_ctx) -> None:  # type: ignore[no-untyped-def]
@@ -343,9 +358,12 @@ def test_scapy_sender_sends_broadcast_arp_through_found_interface(monkeypatch) -
     assert call["iface"] is mine
     assert call["timeout"] == 1.5
     assert call["verbose"] == 0
+    assert call["inter"] == 0.0
     ether = call["packet"]
-    assert isinstance(ether, _Ether) and ether.fields == {"dst": "ff:ff:ff:ff:ff:ff"}
-    assert isinstance(ether.payload, _Arp) and ether.payload.fields == {"pdst": asked}
+    # Absender ausdrücklich aus dem Adapter, nicht aus Scapys zwischengespeicherter Routentabelle (Befund WIN-06)
+    assert isinstance(ether, _Ether) and ether.fields == {"dst": "ff:ff:ff:ff:ff:ff", "src": "00:1b:21:00:00:20"}
+    assert isinstance(ether.payload, _Arp)
+    assert ether.payload.fields == {"pdst": asked, "psrc": "192.168.178.20", "hwsrc": "00:1b:21:00:00:20"}
 
 
 def test_scapy_sender_finds_interface_by_secondary_address(monkeypatch) -> None:  # type: ignore[no-untyped-def]

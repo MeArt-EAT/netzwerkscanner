@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zlib
@@ -24,6 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from netscan.config import BUNDLED_OUI
+from netscan.core.context import ScanContext
 from netscan.core.models import normalize_mac
 
 log = logging.getLogger(__name__)
@@ -31,7 +33,11 @@ log = logging.getLogger(__name__)
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_FILE = "oui.tsv.gz"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Netzwerkscanner-OUI-Update"
-FETCH_TIMEOUT_S = 30
+# Zeitgrenze je Socket-Operation (Verbindung, TLS, jedes Lesen). Kurz, damit ein Abbruch binnen 5 s greift
+# (BAUPLAN §6); zwischen den Blöcken wird ctx.check_cancel() geprüft.
+FETCH_TIMEOUT_S = 4.0
+FETCH_TOTAL_S = 180.0  # Obergrenze für den ganzen Download (rund 6 MB)
+FETCH_CHUNK = 64 * 1024
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # die echte Liste hat rund 6 MB
 
 # fetch(url) -> bytes; Standard: urllib mit Timeout und Browser-ähnlichem User-Agent
@@ -131,18 +137,36 @@ class OuiDb:
 # --- Aktualisierung ------------------------------------------------------------
 
 
-def _default_fetch(url: str) -> bytes:
-    """Lädt die Liste per urllib (Timeout 30 s, Browser-ähnlicher User-Agent)."""
+def _default_fetch(url: str, ctx: ScanContext | None = None) -> bytes:
+    """Lädt die Liste per urllib (Browser-ähnlicher User-Agent).
+
+    Gelesen wird in Blöcken mit kurzer Zeitgrenze je Socket-Operation; vor jedem Block prüft
+    ctx.check_cancel() den Abbruch. Die Gesamtzeit ist auf FETCH_TOTAL_S begrenzt.
+    """
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    deadline = time.monotonic() + FETCH_TOTAL_S
+    chunks: list[bytes] = []
+    size = 0
     try:
+        if ctx is not None:
+            ctx.check_cancel()
         with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_S) as response:
-            data = response.read(MAX_DOWNLOAD_BYTES + 1)
+            while True:
+                if ctx is not None:
+                    ctx.check_cancel()
+                if time.monotonic() > deadline:
+                    raise TimeoutError("der Download dauert zu lange")
+                chunk = response.read1(FETCH_CHUNK)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_DOWNLOAD_BYTES:
+                    raise ValueError("Die heruntergeladene Herstellerliste ist unerwartet groß und wird verworfen.")
+                chunks.append(chunk)
     except (urllib.error.URLError, TimeoutError, http.client.HTTPException) as exc:
         reason = getattr(exc, "reason", None) or exc
         raise OSError(f"Die Herstellerliste konnte nicht geladen werden: {reason}") from exc
-    if len(data) > MAX_DOWNLOAD_BYTES:
-        raise ValueError("Die heruntergeladene Herstellerliste ist unerwartet groß und wird verworfen.")
-    return data
+    return b"".join(chunks)
 
 
 def _parse_ieee_csv(raw: bytes) -> dict[str, str]:
@@ -165,11 +189,23 @@ def _parse_ieee_csv(raw: bytes) -> dict[str, str]:
     return table
 
 
-def update_from_ieee(data_dir: Path, fetch: Fetcher | None = None, *, min_entries: int = 10000) -> int:
+def update_from_ieee(
+    data_dir: Path, fetch: Fetcher | None = None, *, min_entries: int = 10000, ctx: ScanContext | None = None
+) -> int:
     """Lädt die IEEE-Liste, wandelt sie um und ersetzt <data_dir>/oui.tsv.gz atomar.
     Keine Rohdatei behalten. Gibt die Zahl der Einträge zurück. Zu kleine oder unbrauchbare Listen
-    (weniger als min_entries) ergeben ValueError; die alte Liste bleibt dann unverändert."""
-    raw = (fetch or _default_fetch)(OUI_URL)
+    (weniger als min_entries) ergeben ValueError; die alte Liste bleibt dann unverändert.
+
+    Mit ctx ist die Aktualisierung abbrechbar (ScanCancelled): während des Downloads je Block und noch
+    einmal direkt vor dem Ersetzen der Datei – ein abgebrochener Auftrag ändert die Liste nie."""
+    if fetch is not None:
+        raw = fetch(OUI_URL)
+    elif ctx is not None:
+        raw = _default_fetch(OUI_URL, ctx)
+    else:
+        raw = _default_fetch(OUI_URL)
+    if ctx is not None:
+        ctx.check_cancel()
     table = _parse_ieee_csv(raw)
     if len(table) < min_entries:
         raise ValueError(
@@ -186,6 +222,8 @@ def update_from_ieee(data_dir: Path, fetch: Fetcher | None = None, *, min_entrie
             out.write(f"# IEEE MA-L (oui.csv) - Quelle: {OUI_URL} - Stand {date.today().isoformat()}\n")
             for prefix in sorted(table):
                 out.write(f"{prefix}\t{table[prefix]}\n")
+        if ctx is not None:
+            ctx.check_cancel()  # letzte Gelegenheit: danach ist die neue Liste in Kraft
         os.replace(tmp_name, target)
     except BaseException:
         with contextlib.suppress(OSError):

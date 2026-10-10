@@ -23,11 +23,11 @@ Dabei geht nichts ins echte Netz.
 | ☐ | Von einem anderen Gerät im WLAN ist die Oberfläche nicht erreichbar | Handy im WLAN: `http://<IP-des-PCs>:8765` aufrufen → keine Verbindung |
 | ☐ | Exporte JSON, CSV und HTML lassen sich öffnen und enthalten alle Geräte | Export-Knöpfe; CSV in Excel öffnen (Umlaute korrekt, Spalten getrennt) |
 | ☐ | Hotspot exakt „DE22LA000256314 8159“: weder Scan noch Monitor starten, auch nicht im Modus „nur eingetragene Geräte“; keine Schaltfläche zum Übergehen | Handy-Hotspot mit genau diesem Namen, PC verbinden → rotes Band, Start-Knopf gesperrt, auch bei Modus „nur eingetragene Geräte“ |
-| ☐ | Nach dem ersten Erkennen greift die Sperre auch bei nicht lesbarem WLAN-Namen | Windows: Standortdienste aus → im selben Hotspot bleibt das rote Band („Gateway gesperrt“) |
+| ☐ | Nach dem ersten Erkennen greift die Sperre auch bei nicht lesbarem WLAN-Namen | Windows: Standortdienste aus → im selben Hotspot bleibt das rote Band („Gesperrtes WLAN“ über den Windows-Netzwerkprofilnamen bzw. „Gesperrtes Netz (Router erkannt)“), dazu kein „Das ist mein Heimnetz“ |
 | ☐ | Ein Hotspot mit ähnlichem, aber anderem Namen wird nicht gesperrt | Hotspot umbenennen (z. B. Endziffer ändern) → gelbes Band „fremdes Netz“, kein rotes |
 | ☐ | Wechselt der Rechner bei laufendem Programm in diesen Hotspot, pausiert der Monitor beim nächsten Durchlauf | Monitor kommt in Stufe 2; in Stufe 1: Wechsel in den Hotspot → nächster Scan-Versuch gesperrt |
 | ☐ | Nicht lesbarer WLAN-Name und nicht das Heimnetz: Warnung, Scan erst nach Bestätigung | Standortdienste aus, fremdes WLAN → gelbes Band mit Hinweis „WLAN-Name nicht lesbar“, Scan erst nach „Nur diesmal scannen“ |
 
 **Beim ersten Scan im Heimnetz:** Das gelbe Band fragt „Ist das dein Heimnetz?“. Klick auf
-„Das ist mein Heimnetz“ speichert die MAC-Adresse der Fritz!Box. Danach scannt der Scanner dort
+„Das ist mein Heimnetz“ speichert die MAC-Adresse der Fritz!Box (über WLAN nur mit eingeschalteter Standortfreigabe, sonst bleibt „Nur diesmal scannen“). Danach scannt der Scanner dort
 ohne Rückfrage.

@@ -36,20 +36,24 @@ if not exist "%SystemRoot%\System32\Npcap\wpcap.dll" (
 rem --- WLAN-Name lesbar? (seit Windows 11 24H2 nur mit Standortberechtigung) ---------
 netsh wlan show interfaces 2>nul | findstr /i /c:"Standort" /c:"location" >nul && (
   echo  WICHTIG: Windows gibt den WLAN-Namen nicht heraus - die Standortberechtigung fehlt.
-  echo           Dann greift die Hotspot-Sperre erst, nachdem der Hotspot einmal erkannt wurde.
+  echo           Die Hotspot-Sperre erkennt den Schul-Hotspot dann nur am Windows-Profilnamen
+  echo           oder an einer früher gemerkten Router-Adresse, und "Das ist mein Heimnetz"
+  echo           geht über WLAN erst wieder, wenn der WLAN-Name lesbar ist.
   echo           Abhilfe: Einstellungen - Datenschutz und Sicherheit - Standort - Standortdienste an
   echo           und "Desktop-Apps den Zugriff auf Ihren Standort erlauben" an.
 )
 
 rem --- 1) Python-Umgebung ----------------------------------------------------------
 if exist "%VPY%" goto :deps
-echo  Lege die Python-Umgebung an: %VENV%
+echo  Lege die Python-Umgebung an: "%VENV%"
 set "BASEPY="
-py -3.13 -c "import sys" >nul 2>&1 && set "BASEPY=py -3.13"
-if not defined BASEPY py -3.12 -c "import sys" >nul 2>&1 && set "BASEPY=py -3.12"
-if not defined BASEPY python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)" >nul 2>&1 && set "BASEPY=python"
+rem  Reihenfolge: 3.13 (entwickelt und getestet), 3.14, 3.12. Nie pauschal "py -3": das kann eine
+rem  Free-threaded-Version wie 3.13t sein, für die nicht alle Pakete fertig gebaut vorliegen.
+for %%v in (3.13 3.14 3.12) do if not defined BASEPY py -%%v -c "import sys" >nul 2>&1 && set "BASEPY=py -%%v"
+if not defined BASEPY python -c "import sys; sys.exit(0 if (3, 12) <= sys.version_info[:2] <= (3, 14) else 1)" >nul 2>&1 && set "BASEPY=python"
 if not defined BASEPY (
-  echo  FEHLER: Python 3.12 oder neuer fehlt. Bitte von python.org installieren.
+  echo  FEHLER: Kein passendes Python gefunden - unterstützt werden 3.12 bis 3.14 von python.org.
+  echo          Installierte Versionen zeigt der Befehl: py -0p
   goto :fail
 )
 if not exist "%APPHOME%" mkdir "%APPHOME%"
@@ -85,7 +89,11 @@ if /i "%MODE%"=="/noadmin" (
 )
 
 echo  Starte den Server mit Adminrechten (Windows fragt gleich nach) ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath '%VPY%' -ArgumentList @('\"%~dp0run_server.py\"','--no-browser') -Verb RunAs -ErrorAction Stop; exit 0 } catch { exit 1 }"
+rem  Pfade gehen als Umgebungsvariablen an PowerShell, nicht in den Befehl eingesetzt: sonst brechen
+rem  Ordnernamen mit Und-Zeichen oder Apostroph den Aufruf ab. [char]34 setzt das Skript in Anführungszeichen (Leerzeichen).
+set "NS_PY=%VPY%"
+set "NS_SCRIPT=%~dp0run_server.py"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Start-Process -FilePath $env:NS_PY -ArgumentList ([char]34 + $env:NS_SCRIPT + [char]34), '--no-browser' -Verb RunAs -ErrorAction Stop; exit 0 } catch { exit 1 }"
 if errorlevel 1 (
   echo.
   echo  Adminrechte wurden nicht erteilt. Ohne Adminrechte: start.bat /noadmin
@@ -95,11 +103,7 @@ if errorlevel 1 (
 :wait
 echo  Warte auf den Server ...
 call :ready 30
-if errorlevel 1 (
-  echo  FEHLER: Der Server antwortet nicht. Bitte das Server-Fenster und die Logdatei prüfen:
-  echo          %APPHOME%\data\logs\netscan.log
-  goto :fail
-)
+if errorlevel 1 goto :noserver
 
 :open
 echo  Öffne %URL%
@@ -107,6 +111,13 @@ start "" "%URL%"
 echo  Fertig. Dieses Fenster kann geschlossen werden; beendet wird der Scanner im Server-Fenster (Strg+C).
 timeout /t 5 >nul
 exit /b 0
+
+:noserver
+rem  Außerhalb eines ( )-Blocks und in Anführungszeichen: eine Klammer oder ein Und-Zeichen im Profilpfad,
+rem  etwa "Max (Admin)", beendet die Batchdatei sonst mit einem Syntaxfehler ohne pause.
+echo  FEHLER: Der Server antwortet nicht. Bitte das Server-Fenster und die Logdatei prüfen:
+echo          "%APPHOME%\data\logs\netscan.log"
+goto :fail
 
 :ready
 rem  %1 = Sekunden warten; errorlevel 0 = Server antwortet

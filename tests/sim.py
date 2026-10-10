@@ -212,10 +212,10 @@ class SimLab:
     def translating_probe(self, original: Callable[..., Any]) -> Callable[..., Any]:
         """Wrapper für netscan.net.ports.probe_port: echter Port -> Sim-Port; unbekannt = geschlossen."""
 
-        def probe(ip: str, port: int, timeout_s: float, read_banner: bool = False):  # type: ignore[no-untyped-def]
+        def probe(ip: str, port: int, timeout_s: float, read_banner: bool = False, **kw: Any):  # type: ignore[no-untyped-def]
             sim_port = self.port_map.get(ip, {}).get(port)
             if sim_port is None:
                 return (False, None)
-            return original(ip, sim_port, timeout_s, read_banner)
+            return original(ip, sim_port, timeout_s, read_banner, **kw)  # source_ip wird durchgereicht
 
         return probe

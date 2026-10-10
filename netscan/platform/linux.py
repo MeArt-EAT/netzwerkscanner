@@ -397,12 +397,23 @@ class LinuxPlatform:
             return _parse_ip_neigh(res.out)
         return _parse_proc_arp(_read_text(self._proc_net / "arp") or "")
 
-    def neighbor_mac(self, ip: str) -> str | None:
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None:
+        """MAC aus dem ARP-Cache; mit interface nur der Eintrag dieser Schnittstelle."""
         try:
             key = str(ipaddress.IPv4Address(str(ip)))
         except ValueError:
             return None
-        return self.neighbor_table().get(key)
+        if interface is None:
+            return self.neighbor_table().get(key)
+        if not re.fullmatch(r"[\w.:@-]{1,32}", interface):
+            return None
+        res = _run(["ip", "-4", "neigh", "show", "dev", interface], CMD_TIMEOUT_S)
+        if res is not None and res.rc == 0:
+            # Mit „dev“ fehlt die Spalte dev – das Format bleibt „IP lladdr MAC STATE“.
+            return _parse_ip_neigh(res.out).get(key)
+        rows = (_read_text(self._proc_net / "arp") or "").splitlines()
+        own = [rows[0]] + [r for r in rows[1:] if r.split()[5:6] == [interface]] if rows else []
+        return _parse_proc_arp("\n".join(own)).get(key)
 
     # --- Ping --------------------------------------------------------------------
     def ping(self, ip: str, timeout_ms: int) -> PingResult:

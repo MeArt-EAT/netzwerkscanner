@@ -47,9 +47,25 @@ def _extra_devices() -> list[Any]:
     ]
 
 
+DEMO_OUI_MESSAGE = (
+    "Im Demo-Modus wird nichts aus dem Internet geladen – die Herstellerliste lässt sich nur im normalen "
+    "Betrieb aktualisieren. Die mitgelieferte Liste bleibt in Gebrauch."
+)
+
+
+def demo_oui_update(data_dir: Any = None, fetch: Any = None, **_kw: Any) -> int:
+    """Ersatz für oui.update_from_ieee im Demo-Modus: lädt nichts, ändert nichts, meldet es verständlich."""
+    raise OSError(DEMO_OUI_MESSAGE)
+
+
+def _demo_fetch(url: str, *_args: Any, **_kw: Any) -> bytes:
+    """Ersatz für oui._default_fetch (doppelt hält besser): keine Verbindung ins Internet."""
+    raise OSError(DEMO_OUI_MESSAGE)
+
+
 def build_demo_services() -> Services:
     """Services mit Demo-Plattform, eigenem Datenordner und laufendem Sim-Netz."""
-    from netscan.net import adapters, arp, names, ports, ssdp
+    from netscan.net import adapters, arp, names, oui, ports, ssdp
     from netscan.platform.base import AdapterDetail, InterfaceAddr, WifiEntry, WifiStatus
     from tests.fakes import FakeArpSender, FakePlatform
     from tests.sim import SimLab, UdpService, free_port, standard_devices
@@ -108,6 +124,9 @@ def build_demo_services() -> Services:
     )
     ssdp.ssdp_discover = lambda ctx, adapter, **kw: real_ssdp(ctx, adapter, target=(ROUTER_IP, udp_port), allowed_ips=kw.get("allowed_ips"))  # type: ignore[assignment]
     ports.probe_port = lab.translating_probe(real_probe)  # type: ignore[assignment]
+    # „Herstellerliste aktualisieren“ ginge sonst per HTTPS an ieee.org – die Demo sendet nichts ins echte Netz.
+    oui.update_from_ieee = demo_oui_update  # type: ignore[assignment]
+    oui._default_fetch = _demo_fetch  # type: ignore[assignment]
 
     log.info("Demo-Netz läuft: %d simulierte Geräte auf 127.0.0.0/28, Daten in %s", len(lab.devices), base)
     return services

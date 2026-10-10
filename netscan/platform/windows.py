@@ -17,7 +17,8 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from netscan.core.models import PingResult, normalize_mac
@@ -30,6 +31,7 @@ CREATE_NO_WINDOW = 0x08000000  # subprocess.CREATE_NO_WINDOW, gibt es nur unter 
 CMD_TIMEOUT_S = 5.0  # netsh, arp, route: lokal, normalerweise < 0,5 s
 PS_ROUTE_TIMEOUT_S = 5.0  # Get-NetRoute; bei Zeitüberschreitung hilft route print
 PS_ADAPTER_TIMEOUT_S = 10.0  # Get-NetAdapter braucht mit PowerShell-Start 2–4 s
+PS_PROFILE_TIMEOUT_S = 5.0  # Get-NetConnectionProfile, nur wenn netsh den WLAN-Namen nicht liefert
 ROUTE_CACHE_S = 5.0
 ADAPTER_CACHE_S = 30.0  # Beschreibung, virtuell, WLAN ändern sich praktisch nie
 PING_MIN_MS = 50
@@ -38,9 +40,18 @@ PING_RESERVE_S = 1.5  # Reserve für den Prozessstart
 
 # PowerShell schreibt in eine Pipe sonst in der OEM-Codepage (cp850) – UTF-8 erzwingen.
 _PS_PREFIX = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $ProgressPreference='SilentlyContinue'; "
+# -IncludeHidden: versteckte virtuelle Adapter (Wi-Fi Direct/mobiler Hotspot, VPN-Miniports) tragen nur
+# dann Virtual=True; ohne den Schalter fehlen sie hier und gälten als physisch.
 _PS_ADAPTERS = (
-    "Get-NetAdapter -ErrorAction SilentlyContinue | "
+    "Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | "
     "Select-Object Name,InterfaceDescription,Virtual,MacAddress,PhysicalMediaType,NdisPhysicalMedium,Status | "
+    "ConvertTo-Json -Compress"
+)
+# Netzwerkprofil je Adapter. Braucht weder Standortberechtigung noch Adminrechte; bei WLAN heißt das
+# Profil beim Anlegen wie die SSID. Nur ein Hinweis in Sperr-Richtung (siehe WifiStatus.profile_names).
+_PS_PROFILES = (
+    "Get-NetConnectionProfile -ErrorAction SilentlyContinue | "
+    "Select-Object Name,InterfaceAlias | "
     "ConvertTo-Json -Compress"
 )
 _PS_ROUTES = (
@@ -233,6 +244,24 @@ def _parse_netsh_interfaces(text: str) -> WifiStatus:
     return WifiStatus([], readable=False, error=error)
 
 
+def _parse_profiles(text: str) -> dict[str, str]:
+    """JSON von Get-NetConnectionProfile (Objekt oder Liste) -> Adaptername -> Profilname.
+
+    Leerzeichen am Rand werden entfernt (sichere Richtung, wie bei netsh). Leere Namen zählen nicht;
+    steht ein Adapter mehrfach da, gewinnt der erste Eintrag.
+    """
+    out: dict[str, str] = {}
+    for item in _json_items(text):
+        alias = str(item.get("InterfaceAlias") or "").strip()
+        name = item.get("Name")
+        if not alias or not isinstance(name, str):
+            continue
+        name = name.strip()
+        if name and alias not in out:
+            out[alias] = name
+    return out
+
+
 _PING_TTL = re.compile(r"TTL=(\d+)", re.IGNORECASE)
 _PING_RTT = re.compile(r"([=<])\s*(\d+(?:[.,]\d+)?)\s*ms", re.IGNORECASE)
 
@@ -257,15 +286,19 @@ _ARP_LINE = re.compile(
 )
 
 
-def _parse_arp(text: str) -> dict[str, str]:
-    """Ausgabe von „arp -a“: IP -> MAC (normalisiert), ohne Broadcast/Multicast.
+# Kopfzeile je Schnittstelle: „Schnittstelle: 192.168.178.20 --- 0xb“ bzw. „Interface: … --- 0x4“
+_ARP_SECTION = re.compile(r"^\s*\S[^:\r\n]*:\s*(\d{1,3}(?:\.\d{1,3}){3})\s+-{3}\s+0x[0-9a-fA-F]+")
 
-    Sprachunabhängig per Regex. Steht eine IP mehrfach da (mehrere Adapter), gewinnt der erste
-    dynamische Eintrag.
-    """
-    out: dict[str, str] = {}
-    dynamic: dict[str, bool] = {}
+
+def _arp_entries(text: str) -> list[tuple[str | None, str, str, bool]]:
+    """Einträge von „arp -a“ als (Schnittstellen-IP, IP, MAC, dynamisch), ohne Broadcast/Multicast."""
+    out: list[tuple[str | None, str, str, bool]] = []
+    section: str | None = None
     for line in (text or "").splitlines():
+        header = _ARP_SECTION.match(line)
+        if header:
+            section = header.group(1)
+            continue
         m = _ARP_LINE.match(line)
         if not m:
             continue
@@ -273,11 +306,36 @@ def _parse_arp(text: str) -> dict[str, str]:
         mac = _usable_neighbor(ip, raw_mac)
         if mac is None:
             continue
-        is_dynamic = kind.startswith("dyn")  # „dynamisch“ / „dynamic“
+        out.append((section, ip, mac, kind.startswith("dyn")))  # „dynamisch“ / „dynamic“
+    return out
+
+
+def _pick(entries: list[tuple[str, str, bool]]) -> dict[str, str]:
+    """IP -> MAC; steht eine IP mehrfach da, gewinnt der erste dynamische Eintrag."""
+    out: dict[str, str] = {}
+    dynamic: dict[str, bool] = {}
+    for ip, mac, is_dynamic in entries:
         if ip not in out or (is_dynamic and not dynamic[ip]):
             out[ip] = mac
             dynamic[ip] = is_dynamic
     return out
+
+
+def _parse_arp(text: str) -> dict[str, str]:
+    """Ausgabe von „arp -a“: IP -> MAC (normalisiert), ohne Broadcast/Multicast.
+
+    Sprachunabhängig per Regex. Steht eine IP mehrfach da (mehrere Adapter), gewinnt der erste
+    dynamische Eintrag.
+    """
+    return _pick([(ip, mac, dyn) for _section, ip, mac, dyn in _arp_entries(text)])
+
+
+def _parse_arp_sections(text: str) -> dict[str | None, dict[str, str]]:
+    """Ausgabe von „arp -a“ je Schnittstelle: Schnittstellen-IP -> (IP -> MAC)."""
+    grouped: dict[str | None, list[tuple[str, str, bool]]] = {}
+    for section, ip, mac, dyn in _arp_entries(text):
+        grouped.setdefault(section, []).append((ip, mac, dyn))
+    return {section: _pick(items) for section, items in grouped.items()}
 
 
 @dataclass(frozen=True)
@@ -370,6 +428,7 @@ class WindowsPlatform:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._routes_cache: tuple[float, list[_Route]] | None = None
+        self._routes_signature: tuple[Any, ...] | None = None  # Adressen beim Füllen des Routen-Caches
         self._details_cache: tuple[float, dict[str, AdapterDetail]] | None = None
         self._wifi_signature: tuple[Any, ...] | None = None
 
@@ -399,7 +458,14 @@ class WindowsPlatform:
             status = WifiStatus([], readable=False, error="netsh ließ sich nicht ausführen")
         else:
             status = _parse_netsh_interfaces(res.out + "\n" + res.err)
-        signature = (tuple((e.interface, e.connected, e.ssid) for e in status.entries), status.readable)
+        if not status.readable or any(e.connected and e.ssid is None for e in status.entries):
+            # Ohne Standortberechtigung liefert netsh keinen Namen – der Profilname kommt ohne sie aus.
+            status = replace(status, profile_names=self.connection_profiles())
+        signature = (
+            tuple((e.interface, e.connected, e.ssid) for e in status.entries),
+            status.readable,
+            tuple(sorted(status.profile_names.items())),
+        )
         with self._lock:
             if signature != self._wifi_signature:
                 # WLAN gewechselt: Routen sofort neu lesen, nicht die des alten Netzes verwenden
@@ -407,10 +473,27 @@ class WindowsPlatform:
                 self._routes_cache = None
         return status
 
+    def connection_profiles(self) -> dict[str, str]:
+        """Adaptername -> Netzwerkprofilname (Get-NetConnectionProfile). Fehler ⇒ leer."""
+        res = _run_ps(_PS_PROFILES, PS_PROFILE_TIMEOUT_S)
+        return _parse_profiles(res.out) if res is not None and res.rc == 0 else {}
+
     # --- Routen ------------------------------------------------------------------
+    def _address_signature(self) -> tuple[Any, ...]:
+        """IPv4-Adressen aller Schnittstellen (psutil, schnell). Ändern sie sich, gilt der Routen-Cache nicht
+        mehr – auch dann, wenn der WLAN-Name nicht lesbar ist und die WLAN-Signatur deshalb gleich bleibt."""
+        try:
+            return tuple(sorted((i.name, i.ipv4, i.netmask, i.is_up) for i in self.interfaces()))
+        except Exception:  # noqa: BLE001 – ohne Signatur lieber neu lesen
+            return (time.monotonic(),)
+
     def _default_routes(self) -> list[_Route]:
         now = time.monotonic()
+        signature = self._address_signature()
         with self._lock:
+            if signature != self._routes_signature:
+                self._routes_signature = signature
+                self._routes_cache = None
             if self._routes_cache and now - self._routes_cache[0] < ROUTE_CACHE_S:
                 return list(self._routes_cache[1])
         routes = self._query_routes()
@@ -452,12 +535,29 @@ class WindowsPlatform:
         res = _run([_system_exe("ARP.EXE"), "-a"], CMD_TIMEOUT_S)
         return _parse_arp(res.out) if res is not None else {}
 
-    def neighbor_mac(self, ip: str) -> str | None:
+    def neighbor_mac(self, ip: str, interface: str | None = None) -> str | None:
+        """MAC aus dem ARP-Cache. Mit interface nur aus dem Abschnitt dieser Schnittstelle – sonst könnte bei
+        gleicher Gateway-IP an zwei Adaptern (Ethernet und Hotspot-WLAN) die MAC des anderen Netzes gelten."""
         try:
             key = str(ipaddress.IPv4Address(str(ip)))
         except ValueError:
             return None
-        return self.neighbor_table().get(key)
+        res = _run([_system_exe("ARP.EXE"), "-a"], CMD_TIMEOUT_S)
+        if res is None:
+            return None
+        if interface is None:
+            return _parse_arp(res.out).get(key)
+        try:
+            own_ips = [i.ipv4 for i in self.interfaces() if i.name == interface]
+        except Exception:  # noqa: BLE001 – Zuordnung unklar ⇒ lieber „unbekannt“ als die MAC eines anderen Netzes
+            log.debug("Schnittstellen für arp -a nicht lesbar", exc_info=True)
+            return None
+        sections = _parse_arp_sections(res.out)
+        for if_ip in own_ips:
+            mac = sections.get(if_ip, {}).get(key)
+            if mac:
+                return mac
+        return None
 
     # --- Ping --------------------------------------------------------------------
     def ping(self, ip: str, timeout_ms: int) -> PingResult:
@@ -480,3 +580,58 @@ class WindowsPlatform:
             return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 – kein Windows oder Aufruf gescheitert
             return False
+
+
+# --- Konsolenfenster des Servers ----------------------------------------------------------
+
+ENABLE_QUICK_EDIT_MODE = 0x0040
+ENABLE_EXTENDED_FLAGS = 0x0080
+
+
+def _mode_without_quick_edit(mode: int) -> int:
+    """Konsolenmodus ohne QuickEdit (ENABLE_EXTENDED_FLAGS muss dafür gesetzt sein)."""
+    return (int(mode) | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE
+
+
+def disable_quick_edit() -> Callable[[], None] | None:
+    """Schaltet QuickEdit für das eigene Konsolenfenster ab und gibt eine Funktion zurück, die den alten
+    Zustand wiederherstellt (None, wenn nichts zu tun war oder es nicht ging).
+
+    Mit QuickEdit startet schon ein Klick ins Server-Fenster den Markiermodus; dann blockiert jede
+    Ausgabe auf die Konsole – Oberfläche und Scan stehen still, bis Esc gedrückt wird. Geändert wird
+    nur der Modus dieser Konsole, keine Einstellung von Windows.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetConsoleMode.restype = wintypes.BOOL
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.SetConsoleMode.restype = wintypes.BOOL
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        handle = kernel32.GetStdHandle(0xFFFFFFF6)  # STD_INPUT_HANDLE (-10)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            return None
+        mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):  # keine Konsole (Eingabe umgeleitet)
+            return None
+        old = int(mode.value)
+        new = _mode_without_quick_edit(old)
+        if new == old or not kernel32.SetConsoleMode(handle, new):
+            return None
+    except Exception:  # noqa: BLE001 – ohne diese Hilfe läuft der Server genauso
+        log.debug("QuickEdit ließ sich nicht abschalten", exc_info=True)
+        return None
+
+    def restore() -> None:
+        try:
+            kernel32.SetConsoleMode(handle, old)
+        except Exception:  # noqa: BLE001
+            log.debug("Konsolenmodus nicht wiederhergestellt", exc_info=True)
+
+    return restore

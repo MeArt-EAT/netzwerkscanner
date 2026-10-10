@@ -42,6 +42,7 @@ class StubGuard:
         self.result = result
         self.checked: list[Adapter | None] = []
         self.remembered: list[str] = []
+        self.remembered_adapters: list[Adapter | None] = []
         self.error: Exception | None = None
         self.remember_error: Exception | None = None
 
@@ -51,10 +52,11 @@ class StubGuard:
             raise self.error
         return self.result
 
-    def remember_home(self, mac: str) -> None:
+    def remember_home(self, mac: str, adapter: Adapter | None = None) -> None:
         if self.remember_error is not None:
             raise self.remember_error
         self.remembered.append(mac)
+        self.remembered_adapters.append(adapter)
 
 
 @dataclass
@@ -115,7 +117,7 @@ def make_env(services: Any, monkeypatch: pytest.MonkeyPatch, **app_kwargs: Any) 
             env.hold_pipeline(ctx)
         return {"mac": mac, "open_ports": 0}
 
-    def update_from_ieee(data_dir: Any, fetch: Any = None) -> int:
+    def update_from_ieee(data_dir: Any, fetch: Any = None, **kwargs: Any) -> int:
         env.oui_calls.append(data_dir)
         if env.hold:
             env.started.set()

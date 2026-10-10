@@ -241,6 +241,10 @@ textarea { width: 100%; resize: vertical; }
 .guard-reason { overflow-wrap: anywhere; }
 .guard-details { font-size: 0.85rem; opacity: 0.85; overflow-wrap: anywhere; }
 .guard-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.guard-warning {
+  font-size: 0.85rem; font-weight: 600; overflow-wrap: anywhere; margin-top: 2px; padding: 2px 6px;
+  color: var(--danger); background: var(--danger-bg); border: 1px solid var(--danger-border); border-radius: 4px;
+}
 .guard-block { background: var(--danger-bg); color: var(--danger); border-bottom-color: var(--danger-border); border-left: 6px solid var(--danger-solid); }
 .guard-confirm { background: var(--warn-bg); color: var(--warn); border-bottom-color: var(--warn-border); border-left: 6px solid #d9a400; }
 .guard-allow { background: var(--ok-bg); color: var(--ok); border-bottom-color: var(--ok-border); border-left: 6px solid #1f9d4c; padding-top: 5px; padding-bottom: 5px; font-size: 0.9rem; }
