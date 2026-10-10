@@ -20,6 +20,7 @@ from netscan.core import models
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_JS = ROOT / "netscan" / "web" / "static" / "app.js"
+MONITOR_JS = ROOT / "netscan" / "web" / "static" / "monitor.js"
 
 NODE_SCRIPT = r"""
 const ui = require(process.argv[2]);
@@ -163,3 +164,100 @@ def test_server_csp_allows_what_the_ui_needs(server) -> None:  # type: ignore[no
     assert "img-src 'self' data:" in csp, "Knotenbilder der Karte sind Data-URIs"
     assert "style-src 'self' 'unsafe-inline'" in csp, "vis-network fügt ein <style>-Element ein"
     assert "ws://127.0.0.1:8765" in csp or "connect-src 'self'" in csp
+
+
+# --- Stufe 2: Felder, die monitor.js liest (BAUPLAN §21, §24, §27, §29) ------------------------------------
+
+# Feldnamen je Typ, die die Oberfläche liest. Jedes muss im Modell (to_dict) bzw. im Vertrag stehen und in monitor.js vorkommen.
+TARGET_FIELDS = {"mac", "enabled", "method", "tcp_port", "offline_after_min", "rtt_threshold_ms", "status", "status_since", "pause_reason",
+                 "last_check", "last_rtt_ms", "last_detail", "last_method", "checks"}
+TARGET_VIEW_EXTRAS = {"device", "availability"}  # TargetView (§27)
+TARGET_VIEW_DEVICE = {"mac", "ip", "display_name", "category", "category_label", "is_self", "online", "mac_random"}  # §27
+CHECK_FIELDS = {"id", "kind", "port", "path", "enabled", "status", "status_since", "last_rtt_ms", "last_detail", "label"}
+ALERT_FIELDS = {"id", "rule", "severity", "title", "message", "mac", "opened", "closed", "acknowledged"}
+STATUS_FIELDS = {"state", "reason", "interval_s", "last_cycle", "next_cycle", "cycle_ms", "targets", "db_size_bytes"}
+CYCLE_FIELDS = {"ts", "targets", "mac", "status", "rtt_ms", "detail", "checks", "id"}  # monitor.cycle (§29)
+SERIES_FIELDS = {"range", "since", "until", "bucket_s", "points", "t", "rtt_avg", "rtt_min", "rtt_max", "up_pct", "n"}  # §24/§27
+TREND_FIELDS = {"day", "up_pct", "n"}
+OVERVIEW_FIELDS = {"db_size_bytes", "db_warn"}
+STATS_FIELDS = {"days", "counts", "active", "unacked"}
+AUTOSTART_FIELDS = {"supported", "enabled", "detail"}
+AVAILABILITY_FIELDS = {"up_pct", "samples", "up"}  # MetricsStore.availability (§24)
+
+
+def _reads(js: str, field: str) -> bool:
+    return re.search(rf"\.{re.escape(field)}\b", js) is not None
+
+
+def test_monitor_fields_exist_in_models() -> None:
+    js = MONITOR_JS.read_text(encoding="utf-8")
+    target = set(models.MonitorTarget(id=1, mac="aa:bb:cc:dd:ee:ff").to_dict())
+    check = set(models.ServiceCheck(id=1, target_id=1, kind="tcp", port=22).to_dict())
+    alert = set(models.Alert(id=1, rule="new_device", key="k", severity="info", title="t").to_dict())
+    status = set(models.MonitorStatus().to_dict())
+    assert TARGET_FIELDS <= target, sorted(TARGET_FIELDS - target)
+    assert CHECK_FIELDS <= check, sorted(CHECK_FIELDS - check)
+    assert ALERT_FIELDS <= alert, sorted(ALERT_FIELDS - alert)
+    assert STATUS_FIELDS <= status, sorted(STATUS_FIELDS - status)
+    assert {"display_name", "ip"} <= TARGET_VIEW_DEVICE
+    device = set(models.Device(mac="aa:bb:cc:dd:ee:ff", ip="10.0.0.1").to_dict())
+    assert TARGET_VIEW_DEVICE <= device, "TargetView.device ist ein Ausschnitt von Device"
+    for group in (TARGET_FIELDS, TARGET_VIEW_EXTRAS, CHECK_FIELDS, ALERT_FIELDS, STATUS_FIELDS, CYCLE_FIELDS, SERIES_FIELDS, TREND_FIELDS,
+                  OVERVIEW_FIELDS, STATS_FIELDS, AUTOSTART_FIELDS, AVAILABILITY_FIELDS):
+        for field in group:
+            assert _reads(js, field), f"monitor.js liest {field} nicht – Liste im Test anpassen"
+    for rule in models.ALERT_RULES:
+        assert f'"{rule}"' in js, f"Regel {rule} fehlt in monitor.js (Alert-Häufigkeit)"
+    for key in ('"24h"', '"7d"'):
+        assert key in js, "Verfügbarkeit 24 h / 7 d aus TargetView.availability"
+
+
+def _norm(path: str) -> str:
+    return re.sub(r"\{[^}]*\}", "{}", path)
+
+
+# Pfad -> Methoden, mit denen monitor.js die Web-API Stufe 2 aufruft (BAUPLAN §27)
+UI_CALLS_STAGE2 = {
+    "/api/monitor": {"get"},
+    "/api/monitor/targets": {"post"},
+    "/api/monitor/targets/{}": {"patch", "delete"},
+    "/api/monitor/targets/{}/suggestions": {"get"},
+    "/api/monitor/targets/{}/checks": {"post"},
+    "/api/monitor/checks/{}": {"patch", "delete"},
+    "/api/monitor/run": {"post"},
+    "/api/metrics/series": {"get"},
+    "/api/metrics/trend": {"get"},
+    "/api/metrics/overview": {"get"},
+    "/api/alerts": {"get"},
+    "/api/alerts/{}/ack": {"post"},
+    "/api/alerts/ack-all": {"post"},
+    "/api/alerts/stats": {"get"},
+    "/api/autostart": {"get", "put"},
+}
+
+
+def test_monitor_calls_use_contract_methods() -> None:
+    """Jeder Aufruf in monitor.js nutzt Methode und Pfad aus §27 (statisch, ohne Server)."""
+    js = MONITOR_JS.read_text(encoding="utf-8")
+    keys = {
+        "monitor": "/api/monitor", "targets": "/api/monitor/targets", "target": "/api/monitor/targets/{}",
+        "suggestions": "/api/monitor/targets/{}/suggestions", "targetChecks": "/api/monitor/targets/{}/checks", "check": "/api/monitor/checks/{}",
+        "run": "/api/monitor/run", "series": "/api/metrics/series", "trend": "/api/metrics/trend", "overview": "/api/metrics/overview",
+        "alerts": "/api/alerts", "ack": "/api/alerts/{}/ack", "ackAll": "/api/alerts/ack-all", "alertStats": "/api/alerts/stats",
+        "autostart": "/api/autostart",
+    }
+    used: dict[str, set[str]] = {}
+    for method, key in re.findall(r'api\("(GET|POST|PUT|PATCH|DELETE)", MAPI\.([A-Za-z]+)', js):
+        used.setdefault(keys[key], set()).add(method.lower())
+    assert used == UI_CALLS_STAGE2, used
+
+
+def test_monitor_paths_are_server_routes(server) -> None:  # type: ignore[no-untyped-def]
+    app = server.create_app(services=object())  # type: ignore[arg-type]  # nur die Routentabelle wird gelesen
+    paths = {_norm(p): set(m) for p, m in app.openapi()["paths"].items()}
+    if not any(p.startswith("/api/monitor") for p in paths):
+        pytest.skip("Web-API Stufe 2 (web/monitor_api.py) ist noch nicht gebaut")
+    missing = {p for p in UI_CALLS_STAGE2 if p not in paths}
+    assert not missing, f"keine Server-Route für: {sorted(missing)}"
+    for path, methods in UI_CALLS_STAGE2.items():
+        assert methods <= paths[path], f"{path}: Server kennt {sorted(paths[path])}, die Oberfläche ruft {sorted(methods)}"

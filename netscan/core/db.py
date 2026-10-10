@@ -14,6 +14,7 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
+JOURNAL_SIZE_LIMIT = 8 * 1024 * 1024  # Bytes, WAL nach einem Checkpoint
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -178,6 +179,8 @@ class Database:
             self.conn.execute("PRAGMA foreign_keys = ON")
             if str(path) != ":memory:":
                 self.conn.execute("PRAGMA journal_mode = WAL")
+                # Nach einem Checkpoint schrumpft die WAL-Datei auf höchstens 8 MB (große Verdichtung, Stufe 2)
+                self.conn.execute(f"PRAGMA journal_size_limit = {JOURNAL_SIZE_LIMIT}")
             self.conn.execute("PRAGMA synchronous = NORMAL")
             self._migrate()
 

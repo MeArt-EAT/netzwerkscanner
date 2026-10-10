@@ -7,7 +7,9 @@
   <title>Netzwerkscanner</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/vendor/vis-network.min.js" defer></script>
+  <script src="/static/vendor/chart.umd.min.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/monitor.js" defer></script>
 </head>
 <body>
 <div class="app" id="app">
@@ -59,7 +61,8 @@
     </div>
 
     <div class="status-line" id="status-line">
-      <span>Status wird geladen …</span>
+      <span class="status-part" id="status-core"><span>Status wird geladen …</span></span>
+      <span class="status-part" id="status-monitor"></span>
     </div>
   </header>
 
@@ -68,6 +71,8 @@
   <div class="tabs" role="tablist" aria-label="Ansichten">
     <button type="button" class="tab" role="tab" id="tab-devices" aria-controls="panel-devices" aria-selected="true">Geräte</button>
     <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="false" tabindex="-1">Netzwerkkarte</button>
+    <button type="button" class="tab" role="tab" id="tab-monitor" aria-controls="panel-monitor" aria-selected="false" tabindex="-1">Überwachung</button>
+    <button type="button" class="tab" role="tab" id="tab-alerts" aria-controls="panel-alerts" aria-selected="false" tabindex="-1">Alerts<span class="tab-count" id="alert-count" hidden></span></button>
     <button type="button" class="tab" role="tab" id="tab-log" aria-controls="panel-log" aria-selected="false" tabindex="-1">Scan-Protokoll</button>
   </div>
 
@@ -111,6 +116,95 @@
         <div class="map-tip" id="map-tip" role="tooltip" hidden></div>
       </div>
       <div class="map-legend" id="map-legend" aria-label="Legende"></div>
+    </section>
+
+    <!-- Reiter Überwachung (monitor.js) -->
+    <section class="panel panel-scroll" id="panel-monitor" role="tabpanel" aria-labelledby="tab-monitor" hidden>
+      <div class="mon-head">
+        <div class="mon-state" id="mon-state" aria-live="polite"></div>
+        <button type="button" class="btn btn-primary" id="btn-mon-run" disabled>Jetzt prüfen</button>
+      </div>
+      <div class="mon-overview">
+        <div class="tiles" id="mon-tiles" aria-label="Zustände der überwachten Geräte"></div>
+        <figure class="chart-card chart-card-inline">
+          <figcaption>Status-Übersicht</figcaption>
+          <div class="chart-box chart-box-small"><canvas id="chart-status" role="img" aria-label="Status-Übersicht der überwachten Geräte"></canvas></div>
+        </figure>
+      </div>
+      <div class="table-wrap table-plain">
+        <table class="grid targets" id="mon-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">IP-Adresse</th>
+              <th scope="col">Status</th>
+              <th scope="col">Antwortzeit</th>
+              <th scope="col">Verfügbarkeit 24 h</th>
+              <th scope="col">7 d</th>
+              <th scope="col">Dienste</th>
+            </tr>
+          </thead>
+          <tbody id="mon-body"></tbody>
+        </table>
+        <div class="empty" id="mon-empty">Überwachung wird geladen …</div>
+      </div>
+      <div class="mon-charts" id="mon-charts" hidden>
+        <div class="mon-charts-head">
+          <h2 id="mon-chart-title">Verlauf</h2>
+          <label class="field"><span>Messreihe</span><select id="mon-series"></select></label>
+          <div class="seg" role="group" aria-label="Zeitraum" id="mon-range">
+            <button type="button" class="seg-btn" data-range="24h" aria-pressed="true">24 h</button>
+            <button type="button" class="seg-btn" data-range="7d" aria-pressed="false">7 d</button>
+            <button type="button" class="seg-btn" data-range="30d" aria-pressed="false">30 d</button>
+            <button type="button" class="seg-btn" data-range="1y" aria-pressed="false">1 Jahr</button>
+          </div>
+          <button type="button" class="btn btn-small" id="btn-mon-detail">Gerätedetails</button>
+        </div>
+        <div class="chart-grid">
+          <figure class="chart-card">
+            <figcaption>Antwortzeit-Verlauf (Mittelwert mit Bereich min–max)</figcaption>
+            <div class="chart-box"><canvas id="chart-rtt" role="img" aria-label="Antwortzeit-Verlauf"></canvas></div>
+            <p class="chart-note" id="chart-rtt-note"></p>
+          </figure>
+          <figure class="chart-card">
+            <figcaption>Verfügbarkeit je Tag (30 Tage)</figcaption>
+            <div class="chart-box"><canvas id="chart-trend" role="img" aria-label="Verfügbarkeits-Trend je Tag"></canvas></div>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <!-- Reiter Alerts (monitor.js) -->
+    <section class="panel panel-scroll" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>
+      <div class="panel-tools">
+        <div class="seg" role="group" aria-label="Welche Alerts" id="alert-filter">
+          <button type="button" class="seg-btn" data-state="active" aria-pressed="true">Aktiv</button>
+          <button type="button" class="seg-btn" data-state="unacked" aria-pressed="false">Unquittiert</button>
+          <button type="button" class="seg-btn" data-state="all" aria-pressed="false">Alle</button>
+        </div>
+        <span class="count" id="alert-summary" aria-live="polite"></span>
+        <button type="button" class="btn" id="btn-ack-all" disabled>Alle quittieren</button>
+      </div>
+      <div class="table-wrap table-plain">
+        <table class="grid alerts" id="alert-table" hidden>
+          <thead>
+            <tr>
+              <th scope="col">Schwere</th>
+              <th scope="col">Alert</th>
+              <th scope="col">Gerät</th>
+              <th scope="col">Beginn</th>
+              <th scope="col">Zustand</th>
+              <th scope="col">Quittiert</th>
+            </tr>
+          </thead>
+          <tbody id="alert-body"></tbody>
+        </table>
+        <div class="empty" id="alert-empty">Alerts werden geladen …</div>
+      </div>
+      <figure class="chart-card">
+        <figcaption>Alert-Häufigkeit je Tag und Regel (30 Tage)</figcaption>
+        <div class="chart-box"><canvas id="chart-freq" role="img" aria-label="Alert-Häufigkeit je Tag und Regel"></canvas></div>
+      </figure>
     </section>
 
     <!-- Reiter Scan-Protokoll -->
@@ -184,6 +278,8 @@
 
     <section id="detail-info"></section>
     <section id="detail-ports"></section>
+    <p class="firewall-hint" id="detail-firewall" role="note" hidden></p>
+    <section class="detail-monitor" id="detail-monitor"></section>
 
     <section id="detail-deep">
       <h3>Tiefenscan</h3>
@@ -252,6 +348,45 @@
         <h3>Kategorien vom Port-Scan ausnehmen</h3>
         <p class="set-hint">Empfindliche Geräte (Drucker, IoT, Steuerungen) bekommen dann keinen Port-Scan.</p>
         <div class="cat-grid" id="set-categories"></div>
+      </section>
+
+      <section class="set-block">
+        <h3>Überwachung</h3>
+        <p class="set-hint">Der Monitor prüft die ausgewählten Geräte regelmäßig, solange der Scanner läuft. Welche Geräte, wählst du im Detailbereich eines Geräts.</p>
+        <label class="check"><input type="checkbox" id="set-mon-enabled"> <span>Überwachung eingeschaltet</span></label>
+        <div class="num-grid">
+          <label>Prüfintervall in Sekunden (10–3600)
+            <input type="number" id="set-mon-interval" min="10" max="3600" step="1" inputmode="numeric">
+          </label>
+          <label>Timeout je Prüfung in Millisekunden (200–2000)
+            <input type="number" id="set-mon-timeout" min="200" max="2000" step="50" inputmode="numeric">
+          </label>
+        </div>
+        <h4>Alerts</h4>
+        <div class="num-grid">
+          <label>Gerät offline: Alert nach Minuten (1–1440)
+            <input type="number" id="set-alert-offline" min="1" max="1440" step="1" inputmode="numeric">
+          </label>
+          <label>Dienst ausgefallen: Alert nach Minuten (1–1440)
+            <input type="number" id="set-alert-service" min="1" max="1440" step="1" inputmode="numeric">
+          </label>
+          <label>Antwortzeit hoch: Alert nach Minuten (1–1440)
+            <input type="number" id="set-alert-rtt" min="1" max="1440" step="1" inputmode="numeric">
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" id="set-alert-new-device"> <span>Alert bei neuem, unbekanntem Gerät</span></label>
+        <label class="check"><input type="checkbox" id="set-alert-new-port"> <span>Alert bei neuem offenen Port an einem bekannten Gerät</span></label>
+      </section>
+
+      <section class="set-block" id="set-autostart-block" hidden>
+        <h3>Autostart</h3>
+        <p class="set-hint">Der Scanner startet mit der Anmeldung, ohne Adminrechte – ARP-Scan dann nicht möglich. Für einen ARP-Scan weiterhin start.bat verwenden.</p>
+        <p id="set-autostart-state"></p>
+        <p class="set-hint" id="set-autostart-detail"></p>
+        <div class="inline-form">
+          <button type="button" class="btn" id="btn-autostart">Autostart einschalten</button>
+          <span class="form-msg" id="set-autostart-msg" role="status"></span>
+        </div>
       </section>
 
       <section class="set-block">

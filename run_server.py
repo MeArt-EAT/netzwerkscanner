@@ -17,7 +17,7 @@ os.chdir(HERE)
 def _pause() -> None:
     try:
         input("\nEnter drücken zum Schließen …")
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, RuntimeError):  # RuntimeError: pythonw (Autostart) hat kein stdin
         pass
 
 

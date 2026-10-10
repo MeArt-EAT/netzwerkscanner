@@ -441,3 +441,4 @@ class ScanOutcome:
     seen_macs: list[str] = field(default_factory=list)
     new_devices: list[Device] = field(default_factory=list)
     new_ports: dict[str, list[PortResult]] = field(default_factory=dict)  # MAC -> neu offene, vorher geprüfte Ports
+    baseline: bool = False  # erster abgeschlossener Scan überhaupt: Grundbestand, keine „Neues Gerät“-Alerts

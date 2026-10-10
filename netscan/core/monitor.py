@@ -443,6 +443,7 @@ class Monitor:
                     {
                         "mac": t.mac,
                         "status": t.status,
+                        "status_since": t.status_since,
                         "rtt_ms": t.last_rtt_ms,
                         "detail": t.pause_reason if t.status == "paused" else t.last_detail,
                         "checks": [

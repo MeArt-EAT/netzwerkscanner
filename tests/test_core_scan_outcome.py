@@ -32,6 +32,9 @@ def test_first_scan_reports_new_devices_but_no_new_ports(lab_env) -> None:  # no
     assert {d.mac for d in outcome.new_devices} >= {NAS_MAC}
     assert len(outcome.new_devices) == summary["new"]
     assert outcome.new_ports == {}  # nichts war vorher geprüft
+    assert outcome.baseline is True  # erster Scan überhaupt: Grundbestand
+    _scan(services)
+    assert seen[-1].baseline is False
 
 
 def test_reopened_port_is_reported_once(lab_env) -> None:  # noqa: F811

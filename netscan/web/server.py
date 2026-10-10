@@ -1,4 +1,4 @@
-"""FastAPI-Server: REST, WebSocket, Sicherheitsregeln. Siehe BAUPLAN §12. (Agent api)
+"""FastAPI-Server: REST, WebSocket, Sicherheitsregeln. Siehe BAUPLAN §12 und §27. (Agent api)
 
 Der Server lauscht nur auf BIND_HOST (127.0.0.1). Aufrufe in andere Module laufen immer über den
 Modulnamen (adapters.find_adapter, pipeline.run_scan, arp.scapy_status, oui.update_from_ieee), damit
@@ -51,11 +51,23 @@ BIND_HOST = "127.0.0.1"  # nie ändern, keine Option dafür (Pflichtenheft, Grun
 ALLOWED_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-# Einstellungen, die per PUT /api/settings änderbar sind
-_INT_SETTINGS = ("rate_pps", "ping_timeout_ms", "ping_workers", "port_timeout_ms", "port_workers")
+# Einstellungen, die per PUT /api/settings änderbar sind (Grenzen: config.SETTING_LIMITS, geprüft im SettingsStore)
+_INT_SETTINGS = (
+    "rate_pps",
+    "ping_timeout_ms",
+    "ping_workers",
+    "port_timeout_ms",
+    "port_workers",
+    # Stufe 2 – Überwachung (BAUPLAN §28)
+    "monitor_interval_s",
+    "monitor_timeout_ms",
+    "alert_offline_minutes",
+    "alert_service_minutes",
+    "alert_rtt_minutes",
+)
 _FLOAT_SETTINGS = ("names_timeout_s", "mdns_timeout_s", "ssdp_timeout_s")
 _LIST_SETTINGS = ("blocked_ssids_extra", "home_gateway_macs", "port_scan_excluded_categories")
-_BOOL_SETTINGS = ("ask_before_foreign_scan",)
+_BOOL_SETTINGS = ("ask_before_foreign_scan", "monitor_enabled", "alert_new_device", "alert_new_port")
 EDITABLE_SETTINGS: frozenset[str] = frozenset(_INT_SETTINGS + _FLOAT_SETTINGS + _LIST_SETTINGS + _BOOL_SETTINGS)
 SSID_MAX_LEN = 64
 SSID_MAX_COUNT = 50
@@ -198,6 +210,25 @@ def _dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
+def _monitor_status(svc: Services) -> dict[str, Any] | None:
+    """Zustand der Überwachung für die Statuszeile (BAUPLAN §27); Fehler ⇒ None."""
+    try:
+        return svc.monitor.status().to_dict()
+    except Exception:  # noqa: BLE001 – die Statusabfrage darf nie scheitern
+        log.debug("Monitor-Status nicht lesbar", exc_info=True)
+        return None
+
+
+def _alert_counts(svc: Services) -> dict[str, int] | None:
+    """Offene und unquittierte Alerts für den Zähler am Reiter (BAUPLAN §27); Fehler ⇒ None."""
+    try:
+        counts = svc.alerts.counts()
+        return {"active": int(counts["active"]), "unacked": int(counts["unacked"])}
+    except Exception:  # noqa: BLE001
+        log.debug("Alert-Zähler nicht lesbar", exc_info=True)
+        return None
+
+
 def _status_dict(svc: Services, adapter_name: str | None) -> dict[str, Any]:
     """Inhalt von GET /api/status (und der hello-Nachricht). Wirft nie."""
     try:
@@ -230,6 +261,8 @@ def _status_dict(svc: Services, adapter_name: str | None) -> dict[str, Any]:
         "oui": {"entries": getattr(svc.oui, "entries", 0), "source": getattr(svc.oui, "source", "")},
         "job": svc.jobs.status().to_dict(),
         "guard": guard,
+        "monitor": _monitor_status(svc),
+        "alerts": _alert_counts(svc),
     }
 
 
@@ -623,11 +656,14 @@ def get_settings(svc: Svc) -> dict[str, Any]:
 def put_settings(svc: Svc, body: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
     changes = _validate_settings(body, svc.settings.load().blocked_gateway_macs)
     try:
-        return svc.settings.update(**changes).to_dict()
+        updated = svc.settings.update(**changes).to_dict()
     except KeyError as exc:
         raise HTTPException(400, f"Einstellung „{exc.args[0] if exc.args else exc}“ ist unbekannt.") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if any(key.startswith(("monitor_", "alert_")) for key in changes) and svc.monitor.running:
+        svc.monitor.trigger()  # Überwachung an/aus, Takt und Schwellen sofort anwenden, nicht erst im nächsten Takt
+    return updated
 
 
 @router.post("/oui/update", status_code=202)

@@ -404,6 +404,7 @@ def run_scan(ctx: ScanContext, request: ScanRequest, services: Services) -> dict
         ctx.log(f"Großes Netz (/{adapter.prefix}) – der Scan dauert länger.", "warning")
 
     inventory = services.inventory
+    baseline = inventory.latest_scan_id() is None  # noch nie ein Scan abgeschlossen ⇒ Grundbestand (Stufe 2)
     scan_id = inventory.begin_scan("scan", adapter.name, adapter.network)
     ctx.scan_id = scan_id
     job = ScanJob(
@@ -469,6 +470,7 @@ def run_scan(ctx: ScanContext, request: ScanRequest, services: Services) -> dict
             ScanOutcome(
                 scan_id=scan_id, kind="scan", adapter=adapter, gateway_mac=guard.gateway_mac,
                 seen_macs=[d.mac for d in devices], new_devices=new_devices, new_ports=new_ports,
+                baseline=baseline,
             )
         )  # fmt: skip
         return {"devices": count, "new": new_count, "duration_s": duration, "network": adapter.network, "scan_id": scan_id}

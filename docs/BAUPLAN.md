@@ -663,3 +663,38 @@ Sendet weiterhin nichts ins echte Netz.
 | api | `web/monitor_api.py`, `web/server.py`, `tests/test_api_monitor_*.py` | Agent api (Zeichner) |
 | frontend | `web/static/*` (außer `vendor/`), `tests/test_frontend_*.py` | Agent frontend (Ingenieur) |
 | platform | `platform/autostart.py`, `demo.py`, `tests/test_autostart_*.py`, `tests/test_demo_*.py` | Agent platform (Zeichner) |
+
+## 34. Entscheidungen der Leitung beim Zusammenbau (10.10.2026)
+
+Antworten auf die Vertragsfragen der Agenten; sie gelten als Teil des Vertrags.
+
+- **Einheiten der Diagramm-API:** `/api/metrics/series` liefert `since`/`until` in Unix-Sekunden, `points[].t` in
+  Millisekunden. `series` nutzt „runde“ Eimer (60 s … 1 Tag, danach ganze Tage), Grenzen auf vollen Minuten,
+  Stunden und UTC-Tagen.
+- **Eingabefehler der Stufe-2-API:** 400 mit deutschem `detail` (eigene Routenklasse in `monitor_api`); die
+  Stufe-1-Endpunkte bleiben bei 422. `POST /api/monitor/run` antwortet 409 „Die Überwachung läuft nicht.“, wenn der
+  Monitor-Thread nicht läuft. `PATCH` mit `null` setzt nur `tcp_port`, `offline_after_min`, `rtt_threshold_ms`
+  zurück; `enabled`/`method` = `null` ⇒ 400. `GET /api/alerts/stats`: `days` 1–365.
+- **Einstellungen wirken sofort:** Nach `PUT /api/settings` mit einem `monitor_*`/`alert_*`-Feld weckt der Server
+  den laufenden Monitor (`trigger()`).
+- **Grundbestand:** Der allererste abgeschlossene Scan (`ScanOutcome.baseline`) löst keine „Neues Gerät“-Alerts
+  aus. Der eigene PC löst nie einen aus. „Neuer offener Port“ gilt für jedes Gerät, das nicht neu ist (nicht nur
+  für als „bekannt“ markierte) – so wird auch der Testwebserver auf einem PC erkannt (Abnahme Stufe 2).
+- **Ereignisse:** `monitor.cycle` enthält je Ziel zusätzlich `status_since`. Beim Quittieren eines Ereignis-Alerts
+  kommt nur `alert.acknowledged` (die Oberfläche lädt neu). Zähler am Reiter Alerts = unquittierte.
+- **Oberflächen-Schnittstelle:** `window.NetscanApp` (api, apiMessage, h, clear, toast, formatTime, formatNumber,
+  on, device, status, settings, tab, selectedMac, setTab, openDetail) ist die Schnittstelle für weitere Reiter in
+  Stufe 3; `on()` liefert alle `/ws`-Ereignisse plus `app.*`-Ereignisse der Oberfläche.
+- **Autostart:** zusätzlich `/RU <DOMÄNE\Benutzer> /IT` – die Aufgabe läuft nur als der angemeldete Benutzer und
+  ohne gespeichertes Kennwort; weiterhin `/RL LIMITED`, nie `HIGHEST`. `autostart_status` wirft nie (Fehler im
+  `detail`). In der Demo ist der Autostart gesperrt (legt nie eine echte Aufgabe an). `run_server.py` fängt unter
+  `pythonw.exe` (kein stdin) auch `RuntimeError` ab.
+- **Plattenhygiene:** `PRAGMA journal_size_limit` = 8 MB (WAL schrumpft nach einem Checkpoint, wichtig nach großen
+  Verdichtungen).
+- **Bekannte Grenzen (bewusst offen):**
+  - Windows meldet „Verbindung abgelehnt“ erst nach etwa 2 s (Wiederholungen nach RST). Mit der 2-s-Grenze
+    erscheint ein geschlossener Port dort als „keine Antwort“; der TCP-Erreichbarkeitstest nutzt deshalb offene
+    Ports aus dem Scan. Eine plattformnahe Abhilfe (SIO_TCP_INITIAL_RTO) ist für Stufe 3 vorgemerkt.
+  - Der Ping des Monitors bindet nicht an die Absenderadresse (`Platform.ping` hat keinen Parameter dafür, wie in
+    Stufe 1). Der Wächter prüft unmittelbar vorher; ein Netzwechsel in diesem Augenblick ist das Restrisiko.
+  - Eine Dienstprüfung dauert höchstens etwa 2 × Timeout (Aufbau, dann Aushandlung und Antwort).

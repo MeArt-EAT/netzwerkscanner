@@ -53,9 +53,28 @@
   const SCAN_RESULT_LABELS = { completed: "abgeschlossen", cancelled: "abgebrochen", failed: "fehlgeschlagen", blocked: "gesperrt" };
   const DISCOVERY_LABELS = { arp: "ARP", ping: "Ping", cache: "ARP-Cache des Systems", self: "eigener PC" };
   const LOG_LEVEL_LABELS = { info: "Info", warning: "Warnung", error: "Fehler" };
-  const SETTINGS_EDITABLE = ["blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories", "ask_before_foreign_scan"];
+  const SETTINGS_EDITABLE = [
+    "blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories", "ask_before_foreign_scan",
+    "monitor_enabled", "monitor_interval_s", "monitor_timeout_ms", "alert_offline_minutes", "alert_service_minutes", "alert_rtt_minutes",
+    "alert_new_device", "alert_new_port",
+  ];
+  // Einstellungen der Überwachung (BAUPLAN §28): [Feld, Eingabe-ID, Bezeichnung, min, max] bzw. [Feld, Eingabe-ID]
+  const MONITOR_NUMBER_SETTINGS = [
+    ["monitor_interval_s", "set-mon-interval", "Prüfintervall", 10, 3600],
+    ["monitor_timeout_ms", "set-mon-timeout", "Timeout je Prüfung", 200, 2000],
+    ["alert_offline_minutes", "set-alert-offline", "Alert „Gerät offline“", 1, 1440],
+    ["alert_service_minutes", "set-alert-service", "Alert „Dienst ausgefallen“", 1, 1440],
+    ["alert_rtt_minutes", "set-alert-rtt", "Alert „Antwortzeit hoch“", 1, 1440],
+  ];
+  const MONITOR_BOOL_SETTINGS = [
+    ["monitor_enabled", "set-mon-enabled"],
+    ["alert_new_device", "set-alert-new-device"],
+    ["alert_new_port", "set-alert-new-port"],
+  ];
   const HUB_ID = "__hub__";
   const MAX_LOG_LINES = 1000;
+  // Reiter in Anzeigereihenfolge (Überwachung und Alerts bedient monitor.js, BAUPLAN §30)
+  const TABS = ["devices", "map", "monitor", "alerts", "log"];
 
   // Farbe und Zeichnung je Kategorie (Symbole auf einer Scheibe, in Hell und Dunkel gut erkennbar)
   const ICON_COLORS = {
@@ -375,6 +394,14 @@
     return changes;
   }
 
+  /** Ganze Zahl aus einem Eingabefeld im Bereich lo–hi, sonst null. */
+  function parseSettingInt(text, lo, hi) {
+    const s = String(text == null ? "" : text).trim();
+    if (!/^\d+$/.test(s)) return null;
+    const n = Number(s);
+    return Number.isSafeInteger(n) && n >= lo && n <= hi ? n : null;
+  }
+
   /** Positionen auf Ringen um die Mitte (0, 0): Startanordnung der Karte (ohne Physik, gleichmäßig verteilt). */
   function ringLayout(count) {
     const out = [];
@@ -478,7 +505,8 @@
         describeResult, apiMessage, truncate, guardTitle, guardDetails, buildScanRequest, buildDevicePatch,
         guardWarning, homeButtonAllowed, shouldMarkCancelling, acceptProgress, countOf,
         diffSettings, ringLayout, freeSlot, planMap, nodeLabel, nodeSpec, iconSvg, iconUri, macPath, plural, categoryLabel,
-        CATEGORY_LIST, CATEGORY_LABELS, RISK_LABELS, RISK_ORDER, JOB_KIND_LABELS, SETTINGS_EDITABLE, HUB_ID,
+        parseSettingInt, CATEGORY_LIST, CATEGORY_LABELS, RISK_LABELS, RISK_ORDER, JOB_KIND_LABELS, SETTINGS_EDITABLE, HUB_ID,
+        MONITOR_NUMBER_SETTINGS, MONITOR_BOOL_SETTINGS, TABS,
       };
     }
     return;
@@ -645,8 +673,8 @@
       renderStatus();
       renderOuiInfo();
     } else if (!state.status) {
-      clear($("status-line"));
-      $("status-line").append(h("span", { class: "chip chip-warn", text: "Status nicht lesbar: " + apiMessage(res.data, "keine Antwort") }));
+      clear($("status-core"));
+      $("status-core").append(h("span", { class: "chip chip-warn", text: "Status nicht lesbar: " + apiMessage(res.data, "keine Antwort") }));
     }
   }
 
@@ -655,7 +683,7 @@
   }
 
   function renderStatus() {
-    const box = $("status-line");
+    const box = $("status-core"); // Monitor-Zustand und Datenbankgröße zeichnet monitor.js in #status-monitor
     clear(box);
     const s = state.status;
     if (!s) {
@@ -679,6 +707,7 @@
       box.append(h("strong", { class: "status-warning", text: "Ohne Npcap/Adminrechte nur Ping-Suche – " + why.join("; ") + "." }));
     }
     box.append(h("span", { text: "Version " + (s.version || "?") + (s.platform ? " · " + s.platform : "") }));
+    emit("app.status", { status: s }); // monitor und alerts aus /api/status (BAUPLAN §27)
   }
 
   // ---------- Auftrag, Fortschritt, Knöpfe ----------
@@ -1062,6 +1091,7 @@
       if (state.devices.has(state.selectedMac)) renderDetail(false);
       else closeDetail();
     }
+    emit("app.devices", {});
   }
 
   // ---------- Reiter Geräte ----------
@@ -1197,6 +1227,7 @@
     markSelectedRow();
     if (state.network) state.network.unselectAll();
     scheduleMapResize();
+    emit("app.detail", { device: null, changed: true });
   }
 
   function markSelectedRow() {
@@ -1272,6 +1303,7 @@
     renderDetailInfo(d);
     renderDetailPorts(d);
     updateDeepButton();
+    emit("app.detail", { device: d, changed: !!forceForm }); // Abschnitt „Überwachung“ (monitor.js)
   }
 
   function renderDetailInfo(d) {
@@ -1604,8 +1636,6 @@
 
   // ---------- Reiter wechseln ----------
 
-  const TABS = ["devices", "map", "log"];
-
   function setTab(name, focus) {
     if (!TABS.includes(name)) return;
     state.tab = name;
@@ -1624,6 +1654,7 @@
       loadLog(state.logScanId);
       loadScans();
     }
+    emit("app.tab", { tab: name });
   }
 
   // ---------- Protokoll ----------
@@ -1758,7 +1789,11 @@
     return false;
   }
 
-  const SETTINGS_DEFAULTS = { blocked_ssids_extra: [], home_gateway_macs: [], rate_pps: 200, port_timeout_ms: 700, port_scan_excluded_categories: [], ask_before_foreign_scan: false };
+  const SETTINGS_DEFAULTS = {
+    blocked_ssids_extra: [], home_gateway_macs: [], rate_pps: 200, port_timeout_ms: 700, port_scan_excluded_categories: [], ask_before_foreign_scan: false,
+    monitor_enabled: true, monitor_interval_s: 60, monitor_timeout_ms: 1000, alert_offline_minutes: 5, alert_service_minutes: 2, alert_rtt_minutes: 5,
+    alert_new_device: true, alert_new_port: true,
+  };
 
   function cloneEditable(settings) {
     const work = {};
@@ -1817,6 +1852,8 @@
     $("set-rate").value = work.rate_pps;
     $("set-port-timeout").value = work.port_timeout_ms;
     $("set-ask-foreign").checked = !!work.ask_before_foreign_scan;
+    for (const [key, id] of MONITOR_NUMBER_SETTINGS) $(id).value = work[key];
+    for (const [key, id] of MONITOR_BOOL_SETTINGS) $(id).checked = !!work[key];
     const cats = $("set-categories");
     clear(cats);
     for (const [value, label] of CATEGORY_LIST) {
@@ -1855,6 +1892,7 @@
       if (typeof dlg.showModal === "function") dlg.showModal();
       else dlg.setAttribute("open", "");
     }
+    emit("app.settings", {}); // Autostart (monitor.js)
   }
 
   function closeSettings() {
@@ -1894,6 +1932,16 @@
     work.rate_pps = Math.round(rate);
     work.port_timeout_ms = Math.round(timeout);
     work.ask_before_foreign_scan = !!$("set-ask-foreign").checked;
+    for (const [key, id, label, lo, hi] of MONITOR_NUMBER_SETTINGS) {
+      const value = parseSettingInt($(id).value, lo, hi);
+      if (value === null) {
+        settingsMessage(`${label}: bitte eine ganze Zahl von ${lo} bis ${formatNumber(hi)} eintragen.`, "error");
+        $(id).focus();
+        return;
+      }
+      work[key] = value;
+    }
+    for (const [key, id] of MONITOR_BOOL_SETTINGS) work[key] = !!$(id).checked;
     const changes = diffSettings(state.settings, work);
     if (!Object.keys(changes).length) {
       closeSettings();
@@ -1913,6 +1961,7 @@
     closeSettings();
     toast("Einstellungen gespeichert.", "ok");
     refreshGuard(false); // gesperrte Namen können die Entscheidung ändern
+    emit("app.settings.saved", { settings: state.settings });
   }
 
   async function updateOui() {
@@ -1990,6 +2039,7 @@
       loadLog(state.logScanId);
       loadScans();
     }
+    emit("app.resync", {});
   }
 
   function handleEvent(msg) {
@@ -2024,8 +2074,9 @@
         onOuiUpdated(data);
         break;
       default:
-        break;
+        break; // monitor.* und alert.* (BAUPLAN §29) behandelt monitor.js über emit()
     }
+    emit(msg.type, data, msg);
   }
 
   function onHello(data) {
@@ -2092,6 +2143,50 @@
     refreshStatus();
     toast(isNumber(data.entries) ? `Herstellerliste aktualisiert: ${formatNumber(data.entries)} Einträge.` : "Herstellerliste aktualisiert.", "ok");
   }
+
+  // ---------- Schnittstelle für monitor.js (Stufe 2) ----------
+
+  // Abonnenten je Ereignistyp: Server-Ereignisse (/ws, z. B. „monitor.cycle“) und Ereignisse der Oberfläche
+  // („app.tab“, „app.detail“, „app.status“, „app.devices“, „app.settings“, „app.settings.saved“, „app.resync“).
+  const listeners = new Map();
+
+  function on(type, fn) {
+    if (typeof type !== "string" || typeof fn !== "function") return;
+    if (!listeners.has(type)) listeners.set(type, []);
+    listeners.get(type).push(fn);
+  }
+
+  /** Ruft alle Abonnenten auf; ein Fehler dort darf die Grundfunktionen nie stören. */
+  function emit(type, data, msg) {
+    const list = listeners.get(type);
+    if (!list) return;
+    for (const fn of list) {
+      try {
+        fn(data || {}, msg || null);
+      } catch (err) {
+        console.error(`Fehler bei der Verarbeitung von „${type}“`, err);
+      }
+    }
+  }
+
+  // Die einzige globale Variable außer den Bibliotheken: nur lesen und die Oberfläche bedienen.
+  window.NetscanApp = Object.freeze({
+    api: api,
+    apiMessage: apiMessage,
+    h: h,
+    clear: clear,
+    toast: toast,
+    formatTime: formatTime,
+    formatNumber: formatNumber,
+    on: on,
+    device: (mac) => state.devices.get(mac) || null,
+    status: () => state.status,
+    settings: () => state.settings,
+    tab: () => state.tab,
+    selectedMac: () => state.selectedMac,
+    setTab: (name) => setTab(name, false),
+    openDetail: (mac) => openDetail(mac),
+  });
 
   // ---------- Start ----------
 
