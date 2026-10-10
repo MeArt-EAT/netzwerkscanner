@@ -30,7 +30,7 @@ JobKind = Literal["scan", "deep_scan", "oui_update"]
 JobState = Literal["idle", "running", "cancelling"]
 JobResult = Literal["completed", "cancelled", "failed", "blocked"]
 GuardDecision = Literal["allow", "confirm", "block"]
-GuardCode = Literal["ok_home", "blocked_ssid", "blocked_gateway", "foreign_network", "unknown_network", "no_gateway"]
+GuardCode = Literal["ok_home", "ok_network", "blocked_ssid", "blocked_gateway", "foreign_network", "unknown_network", "no_gateway"]
 
 _MAC_HEX = re.compile(r"[0-9a-fA-F]")
 
@@ -225,6 +225,8 @@ class GuardResult:
     ssid_readable: bool = True
     gateway_ip: str | None = None
     gateway_mac: str | None = None
+    profile_name: str | None = None  # Windows-Netzwerkprofil des Adapters (wenn die SSID nicht lesbar ist)
+    home_allowed: bool = False  # darf dieser Router jetzt als Heimnetz gemerkt werden? (nur bei confirm)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

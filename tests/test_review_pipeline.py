@@ -40,7 +40,7 @@ def net(data_dir, monkeypatch):  # type: ignore[no-untyped-def]
 
     platform = FakePlatform()
     services = build_services(data_dir=data_dir, platform=platform, oui=FakeOui())  # type: ignore[arg-type]
-    services.settings.update(rate_pps=1000, names_timeout_s=0.2, mdns_timeout_s=0.5, ssdp_timeout_s=0.5)
+    services.settings.update(rate_pps=1000, names_timeout_s=0.2, mdns_timeout_s=0.5, ssdp_timeout_s=0.5, ask_before_foreign_scan=True)
     rec = Recorder()
     sender = FakeArpSender({})
     holder = {"adapter": ETH}

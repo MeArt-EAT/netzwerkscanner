@@ -53,6 +53,10 @@ out.guard = {
   homeWlanReadable: ui.homeButtonAllowed(confirmReadable, { name: "WLAN", is_wireless: true }),
   homeNoMac: ui.homeButtonAllowed(Object.assign({}, confirmReadable, { gateway_mac: null }), { is_wireless: false }),
   homeBlock: ui.homeButtonAllowed({ decision: "block", gateway_mac: "x" }, { is_wireless: false }),
+  // Ohne Standortfreigabe, aber mit Netzwerkprofilnamen: Server entscheidet über home_allowed
+  warnProfile: ui.guardWarning(Object.assign({}, confirmUnreadable, { profile_name: "Welt" })),
+  homeServerYes: ui.homeButtonAllowed(Object.assign({}, confirmUnreadable, { profile_name: "Welt", home_allowed: true }), { name: "WLAN", is_wireless: true }),
+  homeServerNo: ui.homeButtonAllowed(Object.assign({}, confirmReadable, { home_allowed: false }), { name: "Ethernet", is_wireless: false }),
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -105,12 +109,20 @@ def test_f6_deep_scan_summary_lists_are_counted(ui: dict[str, Any]) -> None:
 
 def test_s1_red_hint_and_no_home_button_over_wlan_without_name(ui: dict[str, Any]) -> None:
     g = ui["guard"]
-    assert "Hotspot-Sperre eingeschränkt" in g["warnUnreadable"] and "Standort" in g["warnUnreadable"]
+    assert "Hotspot-Sperre eingeschränkt" in g["warnUnreadable"] and "Netzwerkprofil" in g["warnUnreadable"]
     assert g["warnAllowUnreadable"]  # auch im Heimnetz sichtbar: die Sperre ist eingeschränkt
     assert g["warnReadable"] == "" and g["warnBlock"] == ""
     assert g["homeWlanUnreadable"] is False and g["homeUnknownAdapter"] is False
     assert g["homeEthernetUnreadable"] is True and g["homeWlanReadable"] is True
     assert g["homeNoMac"] is False and g["homeBlock"] is False
+
+
+def test_profile_name_replaces_location_permission(ui: dict[str, Any]) -> None:
+    """Leitung: Standortfreigabe bleibt beim Nutzer aus. Mit Netzwerkprofilnamen keine rote Warnung,
+    und der Heimnetz-Knopf folgt der Entscheidung des Servers (home_allowed)."""
+    g = ui["guard"]
+    assert g["warnProfile"] == ""
+    assert g["homeServerYes"] is True and g["homeServerNo"] is False
 
 
 def test_s1_guard_band_uses_the_helpers_and_the_warning_style() -> None:

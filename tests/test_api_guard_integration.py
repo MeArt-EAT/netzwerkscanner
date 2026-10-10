@@ -58,6 +58,7 @@ def calls(monkeypatch):
 @pytest.fixture
 def api(services, calls):
     """TestClient mit den echten Bausteinen aus services (Guard, Adapterliste) auf der FakePlatform."""
+    services.settings.update(ask_before_foreign_scan=True)  # strenge Regel; Standard: tests/test_guard_free.py
     with TestClient(server.create_app(services), base_url=BASE) as client:
         yield client
     services.jobs.wait(5)

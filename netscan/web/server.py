@@ -55,7 +55,8 @@ _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _INT_SETTINGS = ("rate_pps", "ping_timeout_ms", "ping_workers", "port_timeout_ms", "port_workers")
 _FLOAT_SETTINGS = ("names_timeout_s", "mdns_timeout_s", "ssdp_timeout_s")
 _LIST_SETTINGS = ("blocked_ssids_extra", "home_gateway_macs", "port_scan_excluded_categories")
-EDITABLE_SETTINGS: frozenset[str] = frozenset(_INT_SETTINGS + _FLOAT_SETTINGS + _LIST_SETTINGS)
+_BOOL_SETTINGS = ("ask_before_foreign_scan",)
+EDITABLE_SETTINGS: frozenset[str] = frozenset(_INT_SETTINGS + _FLOAT_SETTINGS + _LIST_SETTINGS + _BOOL_SETTINGS)
 SSID_MAX_LEN = 64
 SSID_MAX_COUNT = 50
 
@@ -340,6 +341,10 @@ def _validate_settings(body: dict[str, Any], blocked_macs: Any = ()) -> dict[str
             if not _is_number(value):
                 raise HTTPException(400, f"{key} muss eine Zahl sein.")
             changes[key] = float(value)
+        elif key in _BOOL_SETTINGS:
+            if not isinstance(value, bool):
+                raise HTTPException(400, f"{key} muss true oder false sein.")
+            changes[key] = value
         elif key == "blocked_ssids_extra":
             changes[key] = _clean_ssids(value)
         elif key == "home_gateway_macs":

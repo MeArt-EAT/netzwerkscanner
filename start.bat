@@ -35,12 +35,9 @@ if not exist "%SystemRoot%\System32\Npcap\wpcap.dll" (
 
 rem --- WLAN-Name lesbar? (seit Windows 11 24H2 nur mit Standortberechtigung) ---------
 netsh wlan show interfaces 2>nul | findstr /i /c:"Standort" /c:"location" >nul && (
-  echo  WICHTIG: Windows gibt den WLAN-Namen nicht heraus - die Standortberechtigung fehlt.
-  echo           Die Hotspot-Sperre erkennt den Schul-Hotspot dann nur am Windows-Profilnamen
-  echo           oder an einer früher gemerkten Router-Adresse, und "Das ist mein Heimnetz"
-  echo           geht über WLAN erst wieder, wenn der WLAN-Name lesbar ist.
-  echo           Abhilfe: Einstellungen - Datenschutz und Sicherheit - Standort - Standortdienste an
-  echo           und "Desktop-Apps den Zugriff auf Ihren Standort erlauben" an.
+  echo  Hinweis: Windows gibt den WLAN-Namen ohne Standortberechtigung nicht heraus.
+  echo           Der Scanner erkennt das Netz dann am Namen des Windows-Netzwerkprofils
+  echo           und sperrt den Schul-Hotspot auch so.
 )
 
 rem --- 1) Python-Umgebung ----------------------------------------------------------

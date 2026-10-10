@@ -53,7 +53,7 @@
   const SCAN_RESULT_LABELS = { completed: "abgeschlossen", cancelled: "abgebrochen", failed: "fehlgeschlagen", blocked: "gesperrt" };
   const DISCOVERY_LABELS = { arp: "ARP", ping: "Ping", cache: "ARP-Cache des Systems", self: "eigener PC" };
   const LOG_LEVEL_LABELS = { info: "Info", warning: "Warnung", error: "Fehler" };
-  const SETTINGS_EDITABLE = ["blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories"];
+  const SETTINGS_EDITABLE = ["blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories", "ask_before_foreign_scan"];
   const HUB_ID = "__hub__";
   const MAX_LOG_LINES = 1000;
 
@@ -273,6 +273,7 @@
   function guardTitle(guard) {
     switch (guard && guard.code) {
       case "ok_home": return "Heimnetz erkannt";
+      case "ok_network": return "Netz frei";
       case "blocked_ssid": return "Gesperrtes WLAN";
       case "blocked_gateway": return "Gesperrtes Netz (Router erkannt)";
       case "foreign_network": return "Fremdes Netz";
@@ -282,13 +283,14 @@
     }
     if (guard && guard.decision === "block") return "Scan gesperrt";
     if (guard && guard.decision === "confirm") return "Bitte bestätigen";
-    return "Heimnetz erkannt";
+    return "Netz frei";
   }
 
   /** Zeile mit WLAN-Name und Gateway unter dem Wächter-Text. */
   function guardDetails(guard) {
     const parts = [];
     if (guard && guard.ssid) parts.push(`WLAN: „${guard.ssid}“`);
+    else if (guard && guard.profile_name) parts.push(`Netzwerkprofil: „${guard.profile_name}“`);
     else if (guard && guard.ssid_readable === false) parts.push("WLAN-Name nicht lesbar");
     if (guard && guard.gateway_ip) {
       parts.push(`Router: ${guard.gateway_ip}${guard.gateway_mac ? " (" + guard.gateway_mac + ")" : ""}`);
@@ -299,17 +301,21 @@
   /** Roter Zusatz, solange Windows den WLAN-Namen nicht herausgibt: die Hotspot-Sperre ist dann eingeschränkt. */
   function guardWarning(guard) {
     if (!guard || guard.ssid_readable !== false || guard.decision === "block") return "";
+    if (guard.profile_name) {
+      // Ohne Standortfreigabe: Erkennung über den Windows-Netzwerkprofilnamen – nur ein sachlicher Hinweis
+      return "";
+    }
     return (
-      "Hotspot-Sperre eingeschränkt: Windows gibt den WLAN-Namen nicht heraus (Standortfreigabe fehlt). " +
-      "Der Schul-Hotspot wird dann nur am Windows-Profilnamen oder an einer früher gemerkten Router-Adresse erkannt. " +
-      "Abhilfe: Einstellungen › Datenschutz und Sicherheit › Standort – Standortdienste und Zugriff für Desktop-Apps an."
+      "Hotspot-Sperre eingeschränkt: Windows nennt weder den WLAN-Namen noch das Netzwerkprofil. " +
+      "Der Schul-Hotspot wird dann nur an einer früher gemerkten Router-Adresse erkannt."
     );
   }
 
-  /** „Das ist mein Heimnetz“ nur bei confirm mit bekannter Router-MAC – und nie über WLAN ohne lesbaren WLAN-Namen
-   *  (der Server lehnt das ab: 422). Unbekannter Adapter zählt vorsichtshalber als WLAN. */
+  /** „Das ist mein Heimnetz“ nur, wenn der Server es annimmt (GuardResult.home_allowed). Ältere Antworten ohne
+   *  das Feld: nur bei bekannter Router-MAC und nie über WLAN mit unlesbarem Namen. */
   function homeButtonAllowed(guard, adapter) {
     if (!guard || guard.decision !== "confirm" || !guard.gateway_mac) return false;
+    if (typeof guard.home_allowed === "boolean") return guard.home_allowed;
     if (guard.ssid_readable === false && !(adapter && adapter.is_wireless === false)) return false;
     return true;
   }
@@ -1752,7 +1758,7 @@
     return false;
   }
 
-  const SETTINGS_DEFAULTS = { blocked_ssids_extra: [], home_gateway_macs: [], rate_pps: 200, port_timeout_ms: 700, port_scan_excluded_categories: [] };
+  const SETTINGS_DEFAULTS = { blocked_ssids_extra: [], home_gateway_macs: [], rate_pps: 200, port_timeout_ms: 700, port_scan_excluded_categories: [], ask_before_foreign_scan: false };
 
   function cloneEditable(settings) {
     const work = {};
@@ -1810,6 +1816,7 @@
     });
     $("set-rate").value = work.rate_pps;
     $("set-port-timeout").value = work.port_timeout_ms;
+    $("set-ask-foreign").checked = !!work.ask_before_foreign_scan;
     const cats = $("set-categories");
     clear(cats);
     for (const [value, label] of CATEGORY_LIST) {
@@ -1886,6 +1893,7 @@
     }
     work.rate_pps = Math.round(rate);
     work.port_timeout_ms = Math.round(timeout);
+    work.ask_before_foreign_scan = !!$("set-ask-foreign").checked;
     const changes = diffSettings(state.settings, work);
     if (!Object.keys(changes).length) {
       closeSettings();

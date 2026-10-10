@@ -25,7 +25,7 @@ def lab_platform(lab: SimLab) -> FakePlatform:
         ifaces=[InterfaceAddr("Ethernet", "127.0.0.1", "255.255.255.240", "00:1b:21:00:00:01", True)],
         details={"Ethernet": AdapterDetail("Ethernet", "Intel(R) Ethernet (Test)", False, False, "00:1b:21:00:00:01")},
         wifi=WifiStatus([WifiEntry("WLAN", False, None)], readable=True),
-        gateways={None: ROUTER_IP, "Ethernet": ROUTER_IP},
+        gateways={None: ROUTER_IP, "Ethernet": ROUTER_IP, "WLAN": None},
         neighbors={ROUTER_IP: ROUTER_MAC},
     )
     p.alive = lab.ping_results()

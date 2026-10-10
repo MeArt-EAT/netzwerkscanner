@@ -26,7 +26,11 @@ HOTSPOT_GW_MAC = "02:1a:2b:00:00:01"
 @pytest.fixture
 def store(tmp_path: Path):  # type: ignore[no-untyped-def]
     db = Database(tmp_path / "guard.sqlite3")
-    yield SettingsStore(db)
+    st = SettingsStore(db)
+    # Diese Datei prüft die strenge Regel des Pflichtenhefts (Heimnetz/Bestätigung). Seit 10.10.2026 ist sie
+    # nur noch per Einstellung aktiv; die Standardregel „frei außer Schule“ prüft tests/test_guard_free.py.
+    st.update(ask_before_foreign_scan=True)
+    yield st
     db.close()
 
 
@@ -98,7 +102,9 @@ def test_s1_extra_blocked_names_also_match_profiles(guard: NetworkGuard, fake: F
 
 
 def test_s1_remember_home_over_wlan_needs_readable_name(guard: NetworkGuard, fake: FakePlatform, store: SettingsStore) -> None:
-    fake.wifi_unreadable(profiles={"WLAN": "Welt"})
+    # Leitungsentscheidung 10.10.2026: Ohne WLAN-Namen UND ohne Netzwerkprofilnamen wird abgelehnt;
+    # ein (nicht gesperrter) Profilname genügt – siehe test_profile_name_allows_home_over_wlan_without_location.
+    fake.wifi_unreadable()
     with pytest.raises(HomeRefused, match="WLAN-Namen"):
         guard.remember_home(HOME_GW_MAC, adapter=wlan_home())
     assert store.load().home_gateway_macs == []
@@ -299,6 +305,7 @@ def test_win07_server_has_no_access_log() -> None:
 
 def test_unreadable_wifi_reason_does_not_offer_home_button(services, fake_platform) -> None:  # type: ignore[no-untyped-def]
     """Leitung: Über WLAN ohne lesbaren Namen wird remember_home abgelehnt – der Text darf es nicht anbieten."""
+    services.settings.update(ask_before_foreign_scan=True)  # strenge Regel
     from tests.fakes import make_adapter
 
     fake_platform.wifi_unreadable()
@@ -309,3 +316,36 @@ def test_unreadable_wifi_reason_does_not_offer_home_button(services, fake_platfo
     assert "Standortberechtigung" in g.reason
     eth = make_adapter("Ethernet")
     assert "„Das ist mein Heimnetz“" in services.guard.check(eth).reason
+
+
+def test_profile_name_allows_home_over_wlan_without_location(services, fake_platform) -> None:  # type: ignore[no-untyped-def]
+    """Leitung: Ohne Standortfreigabe genügt der (nicht gesperrte) Netzwerkprofilname, um das Heimnetz zu merken."""
+    services.settings.update(ask_before_foreign_scan=True)  # strenge Regel
+    from tests.fakes import HOME_GW_MAC, HOTSPOT_SSID, make_adapter
+
+    wlan = make_adapter("WLAN", ipv4="192.168.178.21", wireless=True, mac="a4:c3:61:00:00:21")
+    fake_platform.wifi_unreadable(profiles={"WLAN": "Welt"})
+    g = services.guard.check(wlan)
+    assert g.decision == "confirm" and g.home_allowed and g.profile_name == "Welt"
+    assert "„Das ist mein Heimnetz“" in g.reason
+    services.guard.remember_home(HOME_GW_MAC, wlan)
+    assert services.guard.check(wlan).decision == "allow"
+
+    # Hotspot-Profil: gesperrt, kein Heimnetz möglich
+    fake_platform.wifi_unreadable(profiles={"WLAN": HOTSPOT_SSID})
+    blocked = services.guard.check(wlan)
+    assert blocked.decision == "block" and not blocked.home_allowed
+
+
+def test_no_profile_no_ssid_still_refuses_home(services, fake_platform) -> None:  # type: ignore[no-untyped-def]
+    import pytest
+    services.settings.update(ask_before_foreign_scan=True)  # strenge Regel
+
+    from netscan.core.guard import HomeRefused
+    from tests.fakes import HOME_GW_MAC, make_adapter
+
+    wlan = make_adapter("WLAN", ipv4="192.168.178.21", wireless=True, mac="a4:c3:61:00:00:21")
+    fake_platform.wifi_unreadable()
+    assert not services.guard.check(wlan).home_allowed
+    with pytest.raises(HomeRefused):
+        services.guard.remember_home(HOME_GW_MAC, wlan)

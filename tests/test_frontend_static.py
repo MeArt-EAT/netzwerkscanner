@@ -300,7 +300,7 @@ def test_settings_only_send_editable_fields(js: str) -> None:
     match = re.search(r"const SETTINGS_EDITABLE = \[([^\]]*)\]", js)
     assert match
     fields = set(re.findall(r'"([a-z_]+)"', match.group(1)))
-    assert fields == {"blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories"}
+    assert fields == {"blocked_ssids_extra", "home_gateway_macs", "rate_pps", "port_timeout_ms", "port_scan_excluded_categories", "ask_before_foreign_scan"}
     assert "blocked_gateway_macs" not in fields and "permanent_blocked_ssids" not in fields
 
 

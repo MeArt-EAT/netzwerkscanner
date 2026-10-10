@@ -225,8 +225,14 @@
       </section>
 
       <section class="set-block">
+        <h3>Fremde Netze</h3>
+        <p class="set-hint">Standard: Jedes nicht gesperrte Netz wird ohne Rückfrage gescannt. Gesperrte Netze (Schule) bleiben immer gesperrt.</p>
+        <label class="check"><input type="checkbox" id="set-ask-foreign"> <span>Vor fremden Netzen nachfragen (nur das Heimnetz ohne Rückfrage)</span></label>
+      </section>
+
+      <section class="set-block">
         <h3>Heimnetz-Gateways</h3>
-        <p class="set-hint">Netze mit diesen Gateway-MAC-Adressen gelten als dein Heimnetz. Entfernen heißt: Beim nächsten Scan dort wird wieder nachgefragt.</p>
+        <p class="set-hint">Netze mit diesen Gateway-MAC-Adressen gelten als dein Heimnetz. Wirkt nur, wenn „Vor fremden Netzen nachfragen“ eingeschaltet ist.</p>
         <ul class="pill-list" id="set-gw-home"></ul>
       </section>
 

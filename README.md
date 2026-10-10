@@ -15,12 +15,10 @@ Netzwerkkarte, Scan-Protokoll und Export als JSON, CSV und HTML.
 1. **Windows 10 oder 11**, **Python 3.12 oder neuer** von python.org.
 2. **Npcap** von npcap.com, Option **„WinPcap API-compatible Mode“ aus**. WinPcap 4.1.3 vorher
    deinstallieren. Ohne Npcap gibt es nur die Ping-Suche.
-3. **Standortberechtigung einschalten.** Seit Windows 11 24H2 gibt Windows den WLAN-Namen nur
-   damit heraus. Einstellungen → Datenschutz und Sicherheit → Standort: „Standortdienste“ an und
-   „Desktop-Apps den Zugriff auf Ihren Standort erlauben“ an. Ohne diese Berechtigung erkennt die
-   Hotspot-Sperre den Schul-Hotspot nur am Namen des Windows-Netzwerkprofils (beim ersten Verbinden
-   gleich dem WLAN-Namen) oder an einer früher gemerkten Router-Adresse. „Das ist mein Heimnetz“ geht
-   über WLAN dann nicht; die Oberfläche zeigt einen roten Hinweis. `start.bat` weist ebenfalls darauf hin.
+3. **Standortberechtigung (optional).** Seit Windows 11 24H2 gibt Windows den WLAN-Namen nur mit
+   Standortberechtigung heraus. Ohne sie erkennt der Scanner das WLAN am Namen des
+   Windows-Netzwerkprofils (`Get-NetConnectionProfile`). Das reicht für das Heimnetz und für die
+   Hotspot-Sperre, solange das Profil so heißt wie das WLAN, was beim ersten Verbinden der Fall ist.
 
 ## Starten
 
@@ -32,8 +30,8 @@ Netzwerkkarte, Scan-Protokoll und Export als JSON, CSV und HTML.
 
 Beendet wird der Scanner im Server-Fenster mit Strg+C.
 
-**Erster Scan:** Das gelbe Band fragt, ob dies dein Heimnetz ist. „Das ist mein Heimnetz“ merkt sich
-die MAC-Adresse des Routers. Danach scannt der Scanner dort ohne Rückfrage.
+**Erster Scan:** Ein grünes Band zeigt „Netz frei“. Der Scan startet ohne Rückfrage. Im Schul-Hotspot zeigt ein
+rotes Band „Scan gesperrt“, dann ist der Start-Knopf aus.
 
 ## Sicherheit
 
@@ -49,8 +47,10 @@ die MAC-Adresse des Routers. Danach scannt der Scanner dort ohne Rückfrage.
 - **Modus „nur eingetragene Geräte“:** fragt nur die gespeicherten Adressen ab, ohne Multicast-Suche
   (mDNS, SSDP). Antwortet dort ein nicht eingetragenes Gerät (auch ein fremder Router), wird es weder
   gespeichert noch weiter geprüft.
-- **Fremde oder unklare Netze:** erst Warnung, Scan nur nach Bestätigung. Fremde Netze, auch das
-  Schulnetz, nur mit Freigabe des Netzbetreibers scannen.
+- **Frei nutzbar außer in der Schule:** Jedes nicht gesperrte Netz wird ohne Rückfrage gescannt. Nachgefragt
+  wird nur, wenn sich nicht prüfen lässt, ob es die Schule ist, weil Windows weder WLAN-Namen noch Netzwerkprofil
+  nennt. Die frühere Rückfrage in fremden Netzen gibt es weiter als Einstellung „Vor fremden Netzen nachfragen“.
+  In fremden Netzen gilt: nur mit Erlaubnis des Netzbetreibers scannen.
 - **Schonend:** höchstens 200 Pakete bzw. Verbindungsversuche pro Sekunde, kurze Wartezeiten,
   Standard-Port-Scan nur auf häufige Ports. Empfindliche Geräte oder ganze Kategorien lassen sich
   vom Port-Scan ausnehmen. Keine Passwort-Rateversuche, keine Exploits.

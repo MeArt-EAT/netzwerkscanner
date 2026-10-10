@@ -73,7 +73,7 @@ Jeder Agent schreibt **nur** in seine Dateien und seine Testdateien `tests/test_
 | Auftragszustand | `state` | `idle`, `running`, `cancelling` |
 | Auftragsergebnis | `result` | `completed`, `cancelled`, `failed`, `blocked` |
 | Wächter-Entscheidung | `decision` | `allow`, `confirm`, `block` |
-| Wächter-Grund | `code` | `ok_home`, `blocked_ssid`, `blocked_gateway`, `foreign_network`, `unknown_network`, `no_gateway` |
+| Wächter-Grund | `code` | `ok_home`, `ok_network`, `blocked_ssid`, `blocked_gateway`, `foreign_network`, `unknown_network`, `no_gateway` |
 | Gerät neu | `is_new` | zuerst im letzten abgeschlossenen Scan gesehen und nicht `known` |
 | Gerät bekannt | `known` | vom Nutzer markiert |
 | Private (zufällige) MAC | `mac_random` | Bit „locally administered“ gesetzt |
@@ -211,6 +211,11 @@ Regeln in dieser Reihenfolge:
 3. Ist der WLAN-Name nicht lesbar (`readable=False` oder `ssid=None` bei verbundenem WLAN) und die
    Gateway-MAC des betroffenen Adapters steht in `blocked_gateway_macs` ⇒ `block`/`blocked_gateway`.
    (Bei lesbarem, anderem Namen greift die MAC-Regel nicht – Pflichtenheft: ähnlicher Name nicht gesperrt.)
+**Standard seit 10.10.2026 – frei außer Schule** (`settings.ask_before_foreign_scan = False`): Nach den Sperrregeln 1–3
+gilt jedes Netz als frei ⇒ `allow`/`ok_network` (bzw. `ok_home` für ein gemerktes Heimnetz), auch ohne Router.
+Nur wenn die Sperre nicht sicher prüfbar ist ⇒ `confirm`/`unknown_network`: Plattformzweifel, oder ein verbundener
+WLAN-Adapter nennt weder SSID noch Netzwerkprofil. Die Regeln 4–6 gelten nur mit `ask_before_foreign_scan = True`:
+
 4. Kein Gateway ermittelbar ⇒ `confirm`/`no_gateway`.
 5. Gateway-MAC in `settings.home_gateway_macs` ⇒ `allow`/`ok_home`.
 6. Sonst ⇒ `confirm`/`foreign_network` (MAC bekannt) bzw. `unknown_network` (MAC unbekannt).
@@ -219,10 +224,13 @@ Regeln in dieser Reihenfolge:
 Ohne Standortberechtigung (Windows 11 24H2) liefert netsh keinen WLAN-Namen. Dann gilt zusätzlich:
 - Heißt ein verbundenes Netzwerkprofil (`profile_names`) exakt wie ein gesperrter Name ⇒ block/blocked_ssid
   (und MAC lernen). Der Profilname wird nie für allow verwendet.
-- `remember_home(mac, adapter)` lehnt über einen WLAN-Adapter mit unlesbarem Namen ab (`HomeRefused` ⇒ API 422);
-  die Oberfläche bietet „Das ist mein Heimnetz“ dann nicht an.
+- `remember_home(mac, adapter)` lehnt über einen WLAN-Adapter ab, wenn weder SSID noch Profilname bekannt sind oder
+  der Name gesperrt ist (`HomeRefused` ⇒ API 422). Ein bekannter, nicht gesperrter Profilname genügt
+  (Leitungsentscheidung 10.10.2026: Standortberechtigung bleibt beim Nutzer aus).
+- `GuardResult.profile_name` und `GuardResult.home_allowed` sagen der Oberfläche, ob „Das ist mein Heimnetz“
+  angeboten wird.
 - Gesperrte MACs werden aus `home_gateway_macs` entfernt; Regel 5 rechnet mit Heimnetz minus gesperrt.
-`start.bat` und die Oberfläche weisen auf die fehlende Standortberechtigung hin.
+`start.bat` nennt den Grund sachlich; eine rote Warnung zeigt die Oberfläche nur, wenn auch der Profilname fehlt.
 
 Es gibt **keinen** Parameter, keine Einstellung und keine Schaltfläche, die `block` übergeht.
 `blocked_gateway_macs` ist über die API nur lesbar. Geprüft wird vor jedem Scan, jedem Tiefenscan

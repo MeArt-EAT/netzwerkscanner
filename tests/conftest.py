@@ -75,8 +75,19 @@ def _sendto(self: socket.socket, data: bytes, *args: object) -> int:
     return _real_sendto(self, data, *args)  # type: ignore[arg-type]
 
 
+def _is_ip_literal(host: object) -> bool:
+    if isinstance(host, bytes):
+        host = host.decode(errors="replace")
+    try:
+        ipaddress.ip_address(str(host).split("%", 1)[0].strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 def _getaddrinfo(host: object, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
-    if not _is_loopback(host):
+    # Ein IP-Literal wird nicht aufgelöst (keine DNS-Anfrage) – das Senden selbst prüft connect/sendto.
+    if not _is_loopback(host) and not _is_ip_literal(host):
         raise LanTrafficError(f"Namensauflösung für {host!r} ist im Test verboten")
     return _real_getaddrinfo(host, *args, **kwargs)  # type: ignore[arg-type]
 

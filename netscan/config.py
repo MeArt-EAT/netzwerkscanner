@@ -72,6 +72,9 @@ class Settings:
     blocked_gateway_macs: list[str] = field(default_factory=list)  # gelernt, über die API nur lesbar
     home_gateway_macs: list[str] = field(default_factory=list)
     port_scan_excluded_categories: list[str] = field(default_factory=list)
+    # Freie Nutzung: nicht gesperrte Netze ohne Rückfrage scannen (Nutzerentscheidung 10.10.2026).
+    # True = frühere Regel aus dem Pflichtenheft: fremde Netze nur nach Bestätigung, Heimnetz merken.
+    ask_before_foreign_scan: bool = False
     last_adapter: str | None = None
 
     def blocked_ssids(self) -> set[str]:

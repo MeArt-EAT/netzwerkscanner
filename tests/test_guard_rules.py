@@ -64,7 +64,11 @@ def fake() -> FlakyPlatform:
 @pytest.fixture
 def store(tmp_path: Path):  # type: ignore[no-untyped-def]
     db = Database(tmp_path / "guard.sqlite3")
-    yield SettingsStore(db)
+    st = SettingsStore(db)
+    # Diese Datei prüft die strenge Regel des Pflichtenhefts (Heimnetz/Bestätigung). Seit 10.10.2026 ist sie
+    # nur noch per Einstellung aktiv; die Standardregel „frei außer Schule“ prüft tests/test_guard_free.py.
+    st.update(ask_before_foreign_scan=True)
+    yield st
     db.close()
 
 
@@ -500,7 +504,8 @@ def test_guard_result_is_json_serializable(guard: NetworkGuard, fake: FlakyPlatf
     join_hotspot(fake)
     data = guard.check(make_adapter()).to_dict()
     assert json.loads(json.dumps(data, ensure_ascii=False))["code"] == "blocked_ssid"
-    assert set(data) == {"decision", "code", "reason", "ssid", "ssid_readable", "gateway_ip", "gateway_mac"}
+    assert set(data) == {"decision", "code", "reason", "ssid", "ssid_readable", "gateway_ip", "gateway_mac",
+                         "profile_name", "home_allowed"}
 
 
 def test_guard_sends_nothing(guard: NetworkGuard, fake: FlakyPlatform) -> None:

@@ -49,6 +49,7 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> Calls:
 @pytest.fixture
 def api(services, calls):  # type: ignore[no-untyped-def]
     """Echter NetworkGuard und echte Adapterliste auf der FakePlatform; nur die Pipeline ist Attrappe."""
+    services.settings.update(ask_before_foreign_scan=True)  # strenge Regel; Standard: tests/test_guard_free.py
     with TestClient(server.create_app(services), base_url=BASE) as client:
         yield client
     services.jobs.wait(5)
@@ -58,7 +59,7 @@ def api(services, calls):  # type: ignore[no-untyped-def]
 
 
 def test_s1_remember_home_over_unreadable_wlan_is_422_and_starts_nothing(api, services, fake_platform, calls) -> None:  # type: ignore[no-untyped-def]
-    fake_platform.wifi_unreadable(profiles={"WLAN": "Welt"})
+    fake_platform.wifi_unreadable()  # weder WLAN-Name noch Netzwerkprofil (Profilname genügt sonst, Leitung 10.10.2026)
     r = api.post("/api/scan", json={"adapter": "WLAN", "confirm_foreign": True, "remember_home": True})
     assert r.status_code == 422, r.text
     assert "WLAN-Namen" in r.json()["detail"] and r.json()["guard"]["ssid_readable"] is False
@@ -228,3 +229,13 @@ def test_f1_cancel_event_comes_before_job_finished(services) -> None:  # type: i
         types = [e.type for e in services.bus.history() if e.job_id == job_id]
         assert types[-1] == "job.finished"
         assert types.index("job.progress") < types.index("job.finished")
+
+
+def test_remember_home_over_wlan_with_profile_name_works(api, services, fake_platform, calls) -> None:  # type: ignore[no-untyped-def]
+    """Leitung: Standortfreigabe aus, aber Windows nennt das Netzwerkprofil – Heimnetz merken geht."""
+    fake_platform.wifi_unreadable(profiles={"WLAN": "Welt"})
+    r = api.post("/api/scan", json={"adapter": "WLAN", "confirm_foreign": True, "remember_home": True})
+    assert r.status_code == 202, r.text
+    services.jobs.wait(5)
+    assert services.settings.load().home_gateway_macs == [HOME_GW_MAC]
+    assert api.get("/api/guard", params={"adapter": "WLAN"}).json()["decision"] == "allow"

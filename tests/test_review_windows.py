@@ -27,7 +27,7 @@ def test_start_bat_keeps_crlf() -> None:
 def test_s1_start_bat_no_longer_promises_protection_that_never_comes() -> None:
     text = "\n".join(bat_lines())
     assert "erst, nachdem der Hotspot einmal erkannt wurde" not in text
-    assert "Windows-Profilnamen" in text and "Das ist mein Heimnetz" in text
+    assert "Windows-Netzwerkprofils" in text and "sperrt den Schul-Hotspot auch so" in text
 
 
 def test_win04_python_search_includes_314_and_caps_python_on_path() -> None:
