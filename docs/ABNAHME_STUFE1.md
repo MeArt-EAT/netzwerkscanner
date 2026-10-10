@@ -3,9 +3,11 @@
 Abhaken auf dem eigenen PC im **Heimnetz**. Fehler bitte mit Konsolenausgabe des Server-Fensters
 und der Logdatei `%LOCALAPPDATA%\Netzwerkscanner\data\logs\netscan.log` zurückmelden.
 
-**Vorher einmal:** Npcap ohne „WinPcap API-compatible Mode“ neu installieren. Derzeit ist der
-Modus an: `WinPcapCompatible = 1`, außerdem liegen `wpcap.dll` und `Packet.dll` in `System32`.
-`start.bat` weist darauf hin, solange das so ist.
+**Vorarbeiten:**
+- ☑ Npcap 1.89 ohne „WinPcap API-compatible Mode“ installiert (10.10.2026). Geprüft: `WinPcapCompatible = 0`,
+  keine `wpcap.dll`/`Packet.dll` mehr in `System32`/`SysWOW64`, Scapy findet die WLAN-Karte.
+- ☐ Standortberechtigung einschalten (Einstellungen → Datenschutz und Sicherheit → Standort: „Standortdienste“ an,
+  „Desktop-Apps den Zugriff auf Ihren Standort erlauben“ an). Sonst liefert Windows den WLAN-Namen nicht.
 
 **Ausprobieren ohne Netz:** `start.bat /demo` startet ein simuliertes Heimnetz auf 127.0.0.x.
 Dabei geht nichts ins echte Netz.
