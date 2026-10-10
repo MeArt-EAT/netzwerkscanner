@@ -1,0 +1,38 @@
+name: Tests
+
+# Läuft bei jedem Hochladen auf main, bei Versionsmarken und von Hand.
+# Die Tests senden nichts ins Netz (Sperre in tests/conftest.py), nur 127.0.0.0/8.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.12"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Abhängigkeiten
+        run: python -m pip install -r requirements-dev.txt
+      - name: Tests
+        run: python -m pytest
