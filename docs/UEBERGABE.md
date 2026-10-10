@@ -88,6 +88,13 @@ Prognose Stufe 2: 2–2½ h, etwa 10 % des Fensters.
   - Prüfen nur lesend bzw. über einen Diagnoselauf, den der Nutzer selbst startet.
 - **Einordnung „unbekannt“** bei mehreren Smart-Home- und Solar-Geräten: FN-LINK „MSA-…“, Smart Innovation „S380HB“, Quectel „marstek“, Viessmann. Die IoT-Herstellertabelle in `netscan/net/classify.py` ließe sich ergänzen.
 - **Fritz-Repeater** melden eine private MAC und werden als Switch eingeordnet. Das ist vertretbar.
+- **Eigen-Scan ignoriert die Firewall:** Den eigenen PC (`is_self`) scannt der Scanner von sich selbst aus. Lokale
+  Verbindungen prüft die Windows-Firewall nicht, deshalb erscheinen gesperrte Ports trotzdem als offen. Im
+  Heimnetz-Test waren das 139/445 („hoch“), obwohl die Freigaberegeln aus sind. Vorschlag für Stufe 3: Beim eigenen PC
+  die Firewall-Regeln mit auswerten (`Get-NetFirewallRule` je Port und Profil) und „lokal offen, von außen
+  gesperrt“ getrennt anzeigen. Bis dahin in der Oberfläche einen Hinweis anzeigen.
+- **MQTT 8883** stuft der Scanner nach der Portnummer als „verschlüsselt“ ein. Beim Mosquitto des Nutzers läuft dort
+  aber Klartext (`listener 8883` ohne TLS). Die echte TLS-Prüfung kommt in Stufe 3.
 - **Lücke beim Profilnamen:** Heißt das Windows-Profil des Hotspots anders als die SSID (umbenannt oder „… 2“), greift die Namensregel nicht. Dann wirkt nur die gelernte Router-MAC.
 
 ## 7. Für Stufe 2 (Überwachung) schon vorbereitet bzw. zu beachten
