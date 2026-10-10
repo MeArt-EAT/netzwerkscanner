@@ -96,6 +96,26 @@ Prognose Stufe 2: 2–2½ h, etwa 10 % des Fensters.
 - **MQTT 8883** stuft der Scanner nach der Portnummer als „verschlüsselt“ ein. Beim Mosquitto des Nutzers läuft dort
   aber Klartext (`listener 8883` ohne TLS). Die echte TLS-Prüfung kommt in Stufe 3.
 - **Lücke beim Profilnamen:** Heißt das Windows-Profil des Hotspots anders als die SSID (umbenannt oder „… 2“), greift die Namensregel nicht. Dann wirkt nur die gelernte Router-MAC.
+- **Start mit Adminrechten aus beschreibbaren Ordnern (Aufgabe, festgestellt am 10.10.2026):**
+  - `start.bat` startet `%LOCALAPPDATA%\Netzwerkscanner\venv\Scripts\python.exe` mit `run_server.py` aus dem
+    Dropbox-Ordner per `Start-Process -Verb RunAs`. Projektordner, Python-Umgebung und `start.bat` selbst lassen
+    sich ohne Adminrechte ändern. Wer dort Code ablegt (ein Programm unter dem Benutzerkonto, auch Claude Code, oder
+    jemand mit Zugriff auf das Dropbox-Konto), bekommt beim nächsten „Ja“ in der Benutzerkontensteuerung
+    Adminrechte.
+  - Die Server-Schnittstelle selbst ist keine solche Brücke: keine Dateipfade, keine Befehle von außen, Export nur als
+    Download, die Herstellerliste nur von der festen IEEE-Adresse.
+  - Lösung:
+    - Ein Installationsschritt, den der Nutzer selbst mit Adminrechten startet, kopiert `netscan/`, `run_server.py`
+      und eine eigene Python-Umgebung nach `C:\Program Files\Netzwerkscanner`. Nur Administratoren dürfen dort
+      schreiben.
+    - Der Start mit Adminrechten läuft nur noch von dort, mit festen Argumenten ohne Umgebungsvariablen aus dem
+      Benutzerkontext und mit `python -I` (ignoriert `PYTHONPATH` und die Benutzer-Pakete).
+    - Aktualisieren nur über diesen Installationsschritt, nachdem `git status` bzw. der Diff geprüft ist.
+    - Die Daten (`%LOCALAPPDATA%\Netzwerkscanner\data`) bleiben beschreibbar. Einstellungen, Datenbank und
+      Herstellerliste deshalb weiter als nicht vertrauenswürdige Eingabe prüfen.
+    - Auf dem Raspberry Pi entsprechend: Dateien unter `/opt/netzwerkscanner`, Besitzer `root`, Dienst über systemd.
+  - Bis dahin gilt für den Nutzer: vor jedem Start mit Adminrechten im Projektordner `git status` aufrufen. Bei
+    Änderungen, die nicht von ihm selbst stammen, in der Benutzerkontensteuerung nicht „Ja“ klicken.
 
 ## 7. Für Stufe 2 (Überwachung) schon vorbereitet bzw. zu beachten
 
