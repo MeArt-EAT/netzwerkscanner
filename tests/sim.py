@@ -58,6 +58,18 @@ class TcpService:
         self.server.server_close()
 
 
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """Ohne socket.getfqdn() im server_bind – das wäre eine Namensauflösung (im Test gesperrt)."""
+
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
+
 class HttpService:
     """HTTP-Dienst mit festen Antworten: routes = {pfad: (content_type, body)}."""
 
@@ -76,8 +88,7 @@ class HttpService:
             def log_message(self, *args: Any) -> None:
                 pass
 
-        self.server = ThreadingHTTPServer((host, port), Handler)
-        self.server.daemon_threads = True
+        self.server = _LoopbackHTTPServer((host, port), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
         self.thread.start()
 

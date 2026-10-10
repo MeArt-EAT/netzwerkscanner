@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Netzwerkscanner</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/vendor/vis-network.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="topbar">
+    <div class="topbar-row">
+      <h1 class="brand">Netzwerkscanner</h1>
+      <span class="live" id="live-indicator" data-state="connecting" title="Verbindung zum Scanner-Server (WebSocket)">
+        <span class="live-dot" aria-hidden="true"></span>
+        <span id="live-text">Verbinde …</span>
+      </span>
+      <nav class="exports" aria-label="Export">
+        <span class="muted">Export:</span>
+        <a class="btn btn-small" href="/api/export/json" download>JSON</a>
+        <a class="btn btn-small" href="/api/export/csv" download>CSV</a>
+        <a class="btn btn-small" href="/api/export/html" download>HTML-Bericht</a>
+      </nav>
+      <button type="button" class="btn" id="btn-settings">Einstellungen</button>
+    </div>
+
+    <div class="toolbar" role="group" aria-label="Scan starten">
+      <label class="field">
+        <span>Netzwerkadapter</span>
+        <select id="adapter"></select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="show-virtual">
+        <span>virtuelle Adapter zeigen</span>
+      </label>
+      <label class="field">
+        <span>Modus</span>
+        <select id="mode">
+          <option value="full">Netz absuchen</option>
+          <option value="registered">Nur eingetragene Geräte</option>
+        </select>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="port-scan" checked>
+        <span>Port-Scan</span>
+      </label>
+      <button type="button" class="btn btn-primary" id="btn-start">Scan starten</button>
+      <button type="button" class="btn" id="btn-cancel" disabled>Abbrechen</button>
+    </div>
+
+    <div class="jobline" id="job-line" aria-live="polite">
+      <progress id="job-progress" max="100" hidden aria-label="Fortschritt"></progress>
+      <span class="job-text" id="job-text">Bereit.</span>
+      <span class="job-result" id="job-result" hidden></span>
+    </div>
+
+    <div class="status-line" id="status-line">
+      <span>Status wird geladen …</span>
+    </div>
+  </header>
+
+  <div class="guard" id="guard-band" hidden></div>
+
+  <div class="tabs" role="tablist" aria-label="Ansichten">
+    <button type="button" class="tab" role="tab" id="tab-devices" aria-controls="panel-devices" aria-selected="true">Geräte</button>
+    <button type="button" class="tab" role="tab" id="tab-map" aria-controls="panel-map" aria-selected="false" tabindex="-1">Netzwerkkarte</button>
+    <button type="button" class="tab" role="tab" id="tab-log" aria-controls="panel-log" aria-selected="false" tabindex="-1">Scan-Protokoll</button>
+  </div>
+
+  <main>
+    <!-- Reiter Geräte -->
+    <section class="panel" id="panel-devices" role="tabpanel" aria-labelledby="tab-devices">
+      <div class="panel-tools">
+        <input type="search" id="device-filter" placeholder="Geräte suchen (Name, IP, MAC, Hersteller …)" aria-label="Geräte suchen" autocomplete="off">
+        <span class="count" id="device-count" aria-live="polite"></span>
+      </div>
+      <div class="table-wrap">
+        <table class="grid devices" id="devices-table">
+          <thead>
+            <tr>
+              <th scope="col">Status</th>
+              <th scope="col" data-th="name"><button type="button" class="th-sort" data-sort="name">Name <span class="arrow" aria-hidden="true">▲</span></button></th>
+              <th scope="col" data-th="ip"><button type="button" class="th-sort" data-sort="ip">IP-Adresse <span class="arrow" aria-hidden="true">▲</span></button></th>
+              <th scope="col">MAC-Adresse</th>
+              <th scope="col">Hersteller</th>
+              <th scope="col" data-th="category"><button type="button" class="th-sort" data-sort="category">Kategorie <span class="arrow" aria-hidden="true">▲</span></button></th>
+              <th scope="col" data-th="risk"><button type="button" class="th-sort" data-sort="risk">Ports <span class="arrow" aria-hidden="true">▲</span></button></th>
+              <th scope="col">Zuletzt gesehen</th>
+            </tr>
+          </thead>
+          <tbody id="devices-body"></tbody>
+        </table>
+        <div class="empty" id="devices-empty" hidden></div>
+      </div>
+    </section>
+
+    <!-- Reiter Netzwerkkarte -->
+    <section class="panel" id="panel-map" role="tabpanel" aria-labelledby="tab-map" hidden>
+      <div class="map-wrap">
+        <div class="map-tools">
+          <button type="button" class="btn btn-small" id="btn-map-fit">Ansicht einpassen</button>
+          <button type="button" class="btn btn-small" id="btn-map-arrange">Neu anordnen</button>
+        </div>
+        <div class="map-canvas" id="map-canvas" aria-label="Netzwerkkarte: Router in der Mitte, alle Geräte außen"></div>
+        <div class="map-empty" id="map-empty" hidden>Noch keine Geräte. Starte einen Scan, dann erscheint hier die Karte.</div>
+        <div class="map-error" id="map-error" hidden>Die Kartenbibliothek (vis-network) konnte nicht geladen werden. Die Geräteliste funktioniert weiterhin.</div>
+        <div class="map-tip" id="map-tip" role="tooltip" hidden></div>
+      </div>
+      <div class="map-legend" id="map-legend" aria-label="Legende"></div>
+    </section>
+
+    <!-- Reiter Scan-Protokoll -->
+    <section class="panel" id="panel-log" role="tabpanel" aria-labelledby="tab-log" hidden>
+      <div class="log-layout">
+        <div class="log-col">
+          <div class="log-head">
+            <h2 id="log-title">Protokoll</h2>
+            <button type="button" class="btn btn-small" id="btn-log-all" hidden>Aktuelles Protokoll</button>
+            <label class="check"><input type="checkbox" id="log-autoscroll" checked> <span>automatisch nach unten</span></label>
+          </div>
+          <div class="log-view" id="log-view" role="log" aria-label="Scan-Protokoll"></div>
+        </div>
+        <div class="log-col">
+          <div class="log-head">
+            <h2>Letzte Scans</h2>
+            <span class="muted">Zeile anklicken: Protokoll dieses Scans</span>
+          </div>
+          <div class="table-wrap">
+            <table class="grid scan-table">
+              <thead>
+                <tr>
+                  <th scope="col">Nr.</th>
+                  <th scope="col">Art</th>
+                  <th scope="col">Start</th>
+                  <th scope="col">Dauer</th>
+                  <th scope="col">Netz</th>
+                  <th scope="col">Ergebnis</th>
+                  <th scope="col">Geräte</th>
+                </tr>
+              </thead>
+              <tbody id="scan-body"></tbody>
+            </table>
+            <div class="empty" id="scan-empty" hidden>Noch keine Scans.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Detailbereich (Seitenleiste) -->
+<aside class="detail" id="detail" aria-labelledby="detail-title" hidden>
+  <div class="detail-head">
+    <div>
+      <h2 id="detail-title"></h2>
+      <p class="muted mono" id="detail-sub"></p>
+    </div>
+    <button type="button" class="icon-btn" id="detail-close" aria-label="Details schließen" title="Schließen (Esc)">×</button>
+  </div>
+  <div class="detail-body">
+    <div class="detail-badges" id="detail-badges"></div>
+
+    <form class="form-grid" id="detail-form" autocomplete="off" novalidate>
+      <label class="stack">Eigener Name
+        <input type="text" id="d-name" maxlength="120">
+      </label>
+      <label class="stack">Kategorie
+        <select id="d-category"></select>
+      </label>
+      <label class="stack">Notiz
+        <textarea id="d-note" rows="3" maxlength="2000"></textarea>
+      </label>
+      <label class="check"><input type="checkbox" id="d-known"> <span>bekannt (ist mir vertraut)</span></label>
+      <label class="check"><input type="checkbox" id="d-excluded"> <span>vom Port-Scan ausnehmen</span></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary" id="d-save">Speichern</button>
+        <span class="form-msg" id="d-msg" role="status"></span>
+      </div>
+    </form>
+
+    <section id="detail-info"></section>
+    <section id="detail-ports"></section>
+
+    <section id="detail-deep">
+      <h3>Tiefenscan</h3>
+      <button type="button" class="btn" id="d-deep">Tiefenscan (Ports 1–1024)</button>
+      <p class="deep-hint" id="d-deep-hint"></p>
+    </section>
+  </div>
+</aside>
+
+<!-- Einstellungen -->
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+  <div class="dlg">
+    <div class="dlg-head">
+      <h2 id="settings-title">Einstellungen</h2>
+      <button type="button" class="icon-btn" id="btn-settings-x" aria-label="Schließen">×</button>
+    </div>
+    <div class="dlg-body">
+
+      <section class="set-block">
+        <h3>Fest gesperrte WLAN-Namen</h3>
+        <p class="set-hint">Diese Namen sind immer gesperrt und nicht entfernbar. Ein Scan ist dort nie möglich.</p>
+        <ul class="pill-list" id="set-ssid-fixed"></ul>
+      </section>
+
+      <section class="set-block">
+        <h3>Eigene gesperrte WLAN-Namen</h3>
+        <p class="set-hint">Der Vergleich ist exakt (Groß-/Kleinschreibung und Leerzeichen zählen). Ein ähnlicher Name ist nicht gesperrt.</p>
+        <ul class="pill-list" id="set-ssid-extra"></ul>
+        <div class="inline-form">
+          <input type="text" id="set-ssid-new" placeholder="WLAN-Name genau so eintragen, wie er angezeigt wird" aria-label="Neuen gesperrten WLAN-Namen eintragen" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn" id="btn-ssid-add">Hinzufügen</button>
+        </div>
+      </section>
+
+      <section class="set-block">
+        <h3>Gelernte gesperrte Gateway-MAC-Adressen</h3>
+        <p class="set-hint">Werden automatisch gelernt, damit die Sperre auch greift, wenn Windows den WLAN-Namen nicht herausgibt. Nur Anzeige, nicht änderbar.</p>
+        <ul class="pill-list" id="set-gw-blocked"></ul>
+      </section>
+
+      <section class="set-block">
+        <h3>Heimnetz-Gateways</h3>
+        <p class="set-hint">Netze mit diesen Gateway-MAC-Adressen gelten als dein Heimnetz. Entfernen heißt: Beim nächsten Scan dort wird wieder nachgefragt.</p>
+        <ul class="pill-list" id="set-gw-home"></ul>
+      </section>
+
+      <section class="set-block">
+        <h3>Drosselung</h3>
+        <div class="num-grid">
+          <label>Pakete/Verbindungen pro Sekunde (10–1000)
+            <input type="number" id="set-rate" min="10" max="1000" step="1" inputmode="numeric">
+          </label>
+          <label>Timeout je Port in Millisekunden (100–2000)
+            <input type="number" id="set-port-timeout" min="100" max="2000" step="50" inputmode="numeric">
+          </label>
+        </div>
+      </section>
+
+      <section class="set-block">
+        <h3>Kategorien vom Port-Scan ausnehmen</h3>
+        <p class="set-hint">Empfindliche Geräte (Drucker, IoT, Steuerungen) bekommen dann keinen Port-Scan.</p>
+        <div class="cat-grid" id="set-categories"></div>
+      </section>
+
+      <section class="set-block">
+        <h3>Herstellerliste</h3>
+        <p class="set-hint" id="set-oui-info"></p>
+        <div class="inline-form">
+          <button type="button" class="btn" id="btn-oui-update">Herstellerliste aktualisieren</button>
+        </div>
+        <p class="set-hint">Lädt ca. 4 MB von ieee.org. Nur auf Knopfdruck, sonst bleibt alles offline.</p>
+      </section>
+    </div>
+    <div class="dlg-foot">
+      <span class="form-msg" id="set-msg" role="status"></span>
+      <button type="button" class="btn" id="btn-settings-cancel">Abbrechen</button>
+      <button type="button" class="btn btn-primary" id="btn-settings-save">Speichern</button>
+    </div>
+  </div>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+</body>
+</html>

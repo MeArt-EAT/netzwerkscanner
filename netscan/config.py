@@ -59,11 +59,11 @@ def log_dir(base: Path | None = None) -> Path:
 @dataclass
 class Settings:
     rate_pps: int = 200  # Pakete bzw. Verbindungsversuche pro Sekunde
-    ping_timeout_ms: int = 800
+    ping_timeout_ms: int = 600
     ping_workers: int = 32
     port_timeout_ms: int = 700
     port_workers: int = 64
-    arp_timeout_s: float = 1.5
+    arp_timeout_s: float = 1.0  # je ARP-Block; /24 = 8 Blöcke à 32, mit 1 Wiederholung höchstens ≈ 16 s
     arp_retries: int = 1
     names_timeout_s: float = 2.0
     mdns_timeout_s: float = 3.0

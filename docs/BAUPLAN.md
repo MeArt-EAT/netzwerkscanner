@@ -139,8 +139,9 @@ class Platform(Protocol):
 Windows-Hinweise (für Agent guard):
 - `netsh wlan show interfaces` ist **sprachabhängig** (deutsch: „Status : Verbunden“) und braucht seit
   Windows 11 24H2 die Standortberechtigung, sonst kommt eine Fehlermeldung statt SSID → dann
-  `WifiStatus(readable=False, …)`. Ausgabe als Bytes lesen, mit Codec `oem` dekodieren
-  (Fallback `cp850`, `errors="replace"`). Zeile `SSID` ≠ `BSSID` beachten.
+  `WifiStatus(readable=False, …)`. Ausgabe als Bytes lesen; **netsh liefert UTF-8**, ping/route/arp
+  liefern OEM (cp850) → Dekodierung: erst UTF-8 strikt, dann `oem`, dann `cp850` (`errors="replace"`).
+  Zeile `SSID` ≠ `BSSID` beachten.
 - `ping -n 1 -w <ms> <ip>`: Erfolg nur, wenn `TTL=` in der Ausgabe steht (Rückgabecode 0 auch
   bei „Zielhost nicht erreichbar“). RTT aus `[=<](\d+)\s*ms`, `Zeit<1ms` → 0.5.
 - Adapterdetails per `powershell -NoProfile -Command "Get-NetAdapter | Select Name,InterfaceDescription,Virtual,MacAddress,PhysicalMediaType,Status | ConvertTo-Json"`.
@@ -155,9 +156,9 @@ Signaturen stehen als Platzhalter in den Dateien und sind verbindlich.
 | Modul | Funktion |
 |---|---|
 | adapters | `list_adapters(platform, include_virtual=False) -> list[Adapter]`, `find_adapter(platform, name) -> Adapter \| None`, `hosts_of(adapter) -> list[str]` |
-| arp | `arp_scan(ctx, adapter, hosts, sender=None) -> dict[ip, mac]`, `scapy_status() -> tuple[bool, str]` |
+| arp | `arp_scan(ctx, adapter, hosts, sender=None) -> dict[ip, mac]`, `scapy_status() -> tuple[bool, str]`, `ArpUnavailable` (Scapy/Npcap/Rechte fehlen → Pipeline fällt auf Ping + ARP-Cache zurück) |
 | ping | `ping_sweep(ctx, hosts) -> dict[ip, PingResult]` (nur erreichbare) |
-| oui | `OuiDb.load(data_dir)`, `.lookup(mac)`, `.entries`, `.source`; `is_random_mac(mac)`; `update_from_ieee(data_dir, fetch=None) -> int` |
+| oui | `OuiDb.load(data_dir)` (None ⇒ nur mitgelieferte Liste), `.lookup(mac)`, `.entries`, `.source`; `is_random_mac(mac)`; `update_from_ieee(data_dir, fetch=None, *, min_entries=10000) -> int` (danach lädt der Server `OuiDb.load` neu) |
 | names | `resolve_names(ctx, ips, adapter, *, resolver=None, netbios_port=137, mdns_browser=None) -> dict[ip, NameInfo]` |
 | ssdp | `ssdp_discover(ctx, adapter, *, target=("239.255.255.250", 1900), allowed_ips=None, fetch=None) -> dict[ip, SsdpInfo]` |
 | ports | `COMMON_PORTS`, `PORT_TABLE`, `DEEP_PORTS`, `describe_port(port) -> PortSpec`, `probe_port(ip, port, timeout_s, read_banner) -> (offen, banner)`, `scan_ports(ctx, targets: dict[ip, list[int]]) -> dict[ip, list[PortResult]]` (ruft `probe_port` über den Modulnamen auf) |
@@ -173,11 +174,12 @@ Testbarkeit: Jede Funktion, die Pakete sendet, hat einen injizierbaren Parameter
 1. Wächter erneut prüfen (doppelt hält besser) → `block` ⇒ `GuardBlocked`.
 2. Adapter und Netz bestimmen. Präfix ≥ /24 normal; /22–/23 Warnung im Protokoll; kleiner als /22 ⇒ Abbruch mit Meldung.
 3. Gerätesuche: `full` ⇒ ARP über alle Hosts + Ping-Ergänzung für den Rest; MAC für Ping-Treffer aus `neighbor_table()`.
-   `registered` ⇒ nur letzte IPs eingetragener Geräte anpingen (+ ARP-Unicast, falls verfügbar); **kein** Absuchen.
+   `registered` ⇒ nur letzte IPs eingetragener Geräte anpingen (+ ARP, falls verfügbar); **kein** Absuchen.
+   Null-, Broadcast- und Multicast-MACs werden verworfen; antwortet eine MAC für mehrere IPs, zählt die erste.
    Ohne Npcap/Adminrechte: nur Ping + ARP-Cache, mit Warnung.
 4. Eigenen PC (`is_self`) und Router (`is_gateway`) ergänzen.
 5. Gespeicherte Nutzerangaben übernehmen (`inventory.merge_user_fields`).
-6. Enricher der Reihe nach: `oui` → `names` → `ssdp` → `ports` (nur wenn `request.port_scan`, nicht für
+6. Enricher (`run(ctx, job: ScanJob, devices)`) der Reihe nach: `oui` → `names` → `ssdp` → `ports` (nur wenn `request.port_scan`, nicht für
    `port_scan_excluded` oder ausgenommene Kategorien) → `classify`. Weitere Stufen hängen Enricher an,
    ohne bestehende umzubauen.
 7. Speichern: `inventory.record_seen()`, `inventory.set_ports()`, je Gerät `device.updated`.
@@ -192,9 +194,11 @@ Fortschrittsphasen (UI-Text): „Gerätesuche (ARP)“, „Ping“, „Namen“,
 
 Regeln in dieser Reihenfolge:
 1. Gesperrte Namen = `PERMANENT_BLOCKED_SSIDS` (`"DE22LA000256314 8159"`, nicht entfernbar) ∪ `settings.blocked_ssids_extra`.
-   Vergleich **exakt** (Groß/Klein, Leerzeichen). Ein ähnlicher Name ist **nicht** gesperrt.
+   Vergleich **exakt** (Groß/Klein, Leerzeichen innen). Leerzeichen am Rand entfernen Plattform und API
+   (sichere Richtung). Ein ähnlicher Name ist **nicht** gesperrt.
 2. Ist **irgendein** verbundenes WLAN gesperrt ⇒ `block`/`blocked_ssid`. Dabei Gateway-MAC dieses WLANs
-   (aus dem ARP-Cache, ohne Pakete) in `settings.blocked_gateway_macs` merken.
+   (aus dem ARP-Cache, ohne Pakete) in `settings.blocked_gateway_macs` merken – nur, wenn das Gateway im
+   Teilnetz dieses WLAN-Adapters liegt. Eine gesperrte MAC kann nie Heimnetz werden (`remember_home` ⇒ ValueError ⇒ API 422).
 3. Ist der WLAN-Name nicht lesbar (`readable=False` oder `ssid=None` bei verbundenem WLAN) und die
    Gateway-MAC des betroffenen Adapters steht in `blocked_gateway_macs` ⇒ `block`/`blocked_gateway`.
    (Bei lesbarem, anderem Namen greift die MAC-Regel nicht – Pflichtenheft: ähnlicher Name nicht gesperrt.)
@@ -202,6 +206,9 @@ Regeln in dieser Reihenfolge:
 5. Gateway-MAC in `settings.home_gateway_macs` ⇒ `allow`/`ok_home`.
 6. Sonst ⇒ `confirm`/`foreign_network` (MAC bekannt) bzw. `unknown_network` (MAC unbekannt).
    Ist der WLAN-Name nicht lesbar, sagt `reason` das dazu.
+
+Hinweis: Ohne Standortberechtigung (Windows 11 24H2) ist der WLAN-Name nie lesbar; dann wirkt nur die gelernte
+MAC-Regel. `start.bat` und die Oberfläche weisen darauf hin.
 
 Es gibt **keinen** Parameter, keine Einstellung und keine Schaltfläche, die `block` übergeht.
 `blocked_gateway_macs` ist über die API nur lesbar. Geprüft wird vor jedem Scan, jedem Tiefenscan
@@ -241,14 +248,14 @@ Lauscht **nur** auf `127.0.0.1` (Konstante `BIND_HOST`, keine Option dafür), Po
 | GET | `/api/status?adapter=` | `{version, platform, admin, scapy:{available,reason}, oui:{entries,source}, job, guard}` |
 | GET | `/api/adapters?include_virtual=false` | `[Adapter]` |
 | GET | `/api/guard?adapter=` | `GuardResult` |
-| POST | `/api/scan` | Body `ScanRequest` → 202 `{job_id}`; 404 Adapter fehlt; 409 Auftrag läuft; **423** gesperrt `{detail, guard}`; **428** Bestätigung nötig `{detail, guard}`; 422 Netz zu groß |
+| POST | `/api/scan` | Body `ScanRequest` → 202 `{job_id, warning?}`; 404 Adapter fehlt; 409 Auftrag läuft; **423** gesperrt `{detail, guard}`; **428** Bestätigung nötig `{detail, guard}`; 422 Netz zu groß |
 | POST | `/api/scan/cancel` | `{cancelled: bool}` |
 | GET | `/api/job` | `JobStatus` |
 | GET | `/api/devices` | `[Device]` |
 | GET/PATCH | `/api/devices/{mac}` | Gerät / Nutzerfelder ändern |
-| POST | `/api/devices/{mac}/deep-scan` | Body `{confirm_foreign}` – gleiche Codes wie `/api/scan` |
+| POST | `/api/devices/{mac}/deep-scan` | Body `{confirm_foreign}` – gleiche Codes wie `/api/scan`; Adapter = der, in dessen Netz die Geräte-IP liegt (sonst `last_adapter`) |
 | GET | `/api/inventory` | `[{mac, ip, name}]` |
-| GET | `/api/scans`, `/api/log?scan_id=` | Verlauf, Protokoll |
+| GET | `/api/scans`, `/api/log?scan_id=&limit=500` | Verlauf, Protokoll |
 | GET | `/api/export/{json\|csv\|html}` | Datei-Download (`Content-Disposition`) |
 | GET/PUT | `/api/settings` | Einstellungen (`blocked_gateway_macs` nur lesen; `permanent_blocked_ssids` nur lesen) |
 | POST | `/api/oui/update` | Auftrag `oui_update` (holt IEEE-Liste, nur auf Knopfdruck) |

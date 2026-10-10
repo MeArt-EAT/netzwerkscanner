@@ -188,7 +188,7 @@ def _discover(ctx: ScanContext, job: ScanJob) -> list[Device]:
             mac = normalize_mac(macs[ip])
         except ValueError:
             continue
-        if mac in _BAD_MACS:
+        if mac in _BAD_MACS or int(mac[:2], 16) & 0x01:  # Null-, Broadcast-, Multicast-MAC
             continue
         if mac in devices:
             ctx.log(f"MAC {mac} antwortet für mehrere Adressen ({devices[mac].ip}, {ip}) – z. B. Repeater. "

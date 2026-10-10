@@ -33,6 +33,14 @@ if not exist "%SystemRoot%\System32\Npcap\wpcap.dll" (
   echo           Laut Pflichtenheft Npcap ohne diese Option neu installieren.
 )
 
+rem --- WLAN-Name lesbar? (seit Windows 11 24H2 nur mit Standortberechtigung) ---------
+netsh wlan show interfaces 2>nul | findstr /i /c:"Standort" /c:"location" >nul && (
+  echo  WICHTIG: Windows gibt den WLAN-Namen nicht heraus - die Standortberechtigung fehlt.
+  echo           Dann greift die Hotspot-Sperre erst, nachdem der Hotspot einmal erkannt wurde.
+  echo           Abhilfe: Einstellungen - Datenschutz und Sicherheit - Standort - Standortdienste an
+  echo           und "Desktop-Apps den Zugriff auf Ihren Standort erlauben" an.
+)
+
 rem --- 1) Python-Umgebung ----------------------------------------------------------
 if exist "%VPY%" goto :deps
 echo  Lege die Python-Umgebung an: %VENV%
