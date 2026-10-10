@@ -162,7 +162,7 @@ def test_win03_retry_timeout_never_exceeds_the_setting(make_ctx) -> None:  # typ
 
 def install_fake_scapy(monkeypatch: pytest.MonkeyPatch, iface: SimpleNamespace) -> types.ModuleType:
     module = types.ModuleType("scapy.all")
-    module.srp_calls = []  # type: ignore[attr-defined]
+    module.sendp_calls = []  # type: ignore[attr-defined]
     module.refreshes = []  # type: ignore[attr-defined]
 
     class Layer:
@@ -174,9 +174,25 @@ def install_fake_scapy(monkeypatch: pytest.MonkeyPatch, iface: SimpleNamespace) 
             self.payload = other
             return self
 
-    def srp(packet, **kwargs):  # type: ignore[no-untyped-def]
-        module.srp_calls.append({"packet": packet, **kwargs})  # type: ignore[attr-defined]
-        return [], []
+    def sendp(packet, **kwargs):  # type: ignore[no-untyped-def]
+        module.sendp_calls.append({"packet": packet, **kwargs})  # type: ignore[attr-defined]
+
+    class AsyncSniffer:  # liest nichts mit: startet sofort, liefert keine Antworten
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            self.running = False
+            self.results: list[object] | None = None
+
+        def start(self) -> None:
+            self.running = True
+            self.kwargs["started_callback"]()  # type: ignore[operator]
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+        def stop(self, join: bool = True) -> None:
+            self.running = False
+            self.results = []
 
     class Ifaces(dict):  # type: ignore[type-arg]
         def reload(self) -> None:
@@ -186,7 +202,8 @@ def install_fake_scapy(monkeypatch: pytest.MonkeyPatch, iface: SimpleNamespace) 
     module.ARP = type("ARP", (Layer,), {})  # type: ignore[attr-defined]
     module.Ether = type("Ether", (Layer,), {})  # type: ignore[attr-defined]
     module.conf = SimpleNamespace(ifaces=Ifaces(x=iface), route=route)  # type: ignore[attr-defined]
-    module.srp = srp  # type: ignore[attr-defined]
+    module.sendp = sendp  # type: ignore[attr-defined]
+    module.AsyncSniffer = AsyncSniffer  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "scapy.all", module)
     return module
 
@@ -197,10 +214,10 @@ def test_s8_scapy_blocks_are_paced_at_the_configured_rate(make_ctx, monkeypatch)
     ctx = make_ctx(rate_pps=10, arp_retries=0)
     ctx.sleep = lambda s: None  # type: ignore[method-assign]
     arp.arp_scan(ctx, make_adapter(), hosts(25))
-    sizes = [len(c["packet"].payload.fields["pdst"]) for c in fake.srp_calls]
+    sizes = [len(c["packet"].payload.fields["pdst"]) for c in fake.sendp_calls]
     assert sizes == [10, 10, 5]  # früher 25 Anfragen auf einmal, obwohl nur 10 je Sekunde erlaubt sind
-    assert all(c["inter"] == pytest.approx(0.1) for c in fake.srp_calls)  # 1/rate_pps zwischen zwei Paketen
-    for call in fake.srp_calls:  # jeder Block: n Pakete im Abstand 1/rate ⇒ höchstens rate je Sekunde
+    assert all(c["inter"] == pytest.approx(0.1) for c in fake.sendp_calls)  # 1/rate_pps zwischen zwei Paketen
+    for call in fake.sendp_calls:  # jeder Block: n Pakete im Abstand 1/rate ⇒ höchstens rate je Sekunde
         n = len(call["packet"].payload.fields["pdst"])
         assert n <= 10 and (n - 1) * call["inter"] <= 1.0
 
@@ -211,8 +228,8 @@ def test_win06_scapy_is_reloaded_once_per_scan_and_sender_addresses_are_explicit
     ctx = make_ctx(rate_pps=1000, arp_retries=1)
     arp.arp_scan(ctx, make_adapter(), hosts(10))
     assert fake.refreshes == ["ifaces", "route"]  # einmal je Scan, nicht je Block
-    assert len(fake.srp_calls) == 2
-    packet = fake.srp_calls[0]["packet"]
+    assert len(fake.sendp_calls) == 2
+    packet = fake.sendp_calls[0]["packet"]
     assert packet.fields["src"] == "00:1b:21:00:00:20"
     assert packet.payload.fields["psrc"] == "192.168.178.20" and packet.payload.fields["hwsrc"] == "00:1b:21:00:00:20"
 
@@ -227,7 +244,7 @@ def test_win06_refresh_errors_do_not_stop_the_scan(make_ctx, monkeypatch) -> Non
     fake.conf.route = SimpleNamespace(resync=broken)  # type: ignore[attr-defined]
     ctx = make_ctx(rate_pps=1000, arp_retries=0)
     assert arp.arp_scan(ctx, make_adapter(), hosts(3)) == {}
-    assert len(fake.srp_calls) == 1
+    assert len(fake.sendp_calls) == 1
 
 
 # --- S9: CSV-Export -------------------------------------------------------------------------------------

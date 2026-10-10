@@ -16,12 +16,13 @@ from netscan.core.models import Adapter, normalize_mac
 
 log = logging.getLogger(__name__)
 
-# sender(adapter, ips, timeout_s) -> {ip: mac}; Standard: Scapy srp() über Npcap
+# sender(adapter, ips, timeout_s) -> {ip: mac}; Standard: Scapy über Npcap – erst mitlesen (AsyncSniffer),
+# dann senden (sendp), Antworten selbst zuordnen. srp() bekommt auf WLAN-Karten 0 Antworten (_scapy_sender).
 ArpSender = Callable[[Adapter, list[str], float], dict[str, str]]
 
 # Blockgröße: so viele Adressen, wie bei settings.rate_pps in BLOCK_SEND_S gesendet werden (höchstens
-# MAX_BLOCK_SIZE). Scapy sendet den Block mit dem Paketabstand 1/rate_pps (srp inter) – also nie mehr als
-# rate_pps Anfragen je Sekunde und kein Stoß. Jeder srp-Aufruf wartet nach dem letzten Paket das volle Timeout;
+# MAX_BLOCK_SIZE). Scapy sendet den Block mit dem Paketabstand 1/rate_pps (sendp inter) – also nie mehr als
+# rate_pps Anfragen je Sekunde und kein Stoß. Jeder Aufruf lauscht nach dem letzten Paket das volle Timeout;
 # wenige große Blöcke statt vieler 32er-Blöcke sparen im /24 rund zehn Sekunden.
 MAX_BLOCK_SIZE = 256
 BLOCK_SEND_S = 1.0  # Sendedauer je Block; mit Timeout ≤ 2 s bleibt der Abbruch unter 5 s
@@ -30,10 +31,14 @@ MIN_RETRY_TIMEOUT_S = 0.3
 PHASE = "Gerätesuche (ARP)"
 _BROADCAST = "ff:ff:ff:ff:ff:ff"
 _MAX_TIMEOUT_S = 2.0  # harte Obergrenze je Netzoperation (Bauplan: ≤ 2 s)
+_REPLY_FILTER = "arp and arp[6:2] = 2"  # BPF: nur ARP-Antworten (Opcode 2 = is-at), nicht die eigenen Anfragen
+_SNIFF_START_S = 1.0  # höchstens so lange auf den Start des Mitlesens warten (normal Millisekunden)
+_LISTEN_GRACE_S = 0.3  # Reserve nach dem Timeout: Npcap liefert Pakete gesammelt (bis 100 ms)
+_STOP_JOIN_S = 1.0  # Nachlauf nach stop(); normal wenige Millisekunden
 
 
 def block_size(rate_pps: float) -> int:
-    """Adressen je srp-Aufruf bei rate_pps Paketen pro Sekunde (mindestens 1, höchstens MAX_BLOCK_SIZE)."""
+    """Adressen je Sender-Aufruf bei rate_pps Paketen pro Sekunde (mindestens 1, höchstens MAX_BLOCK_SIZE)."""
     try:
         rate = float(rate_pps)
     except (TypeError, ValueError):
@@ -150,16 +155,72 @@ def _refresh_scapy() -> None:
             log.debug("Scapy: %s nicht neu lesbar", what, exc_info=True)
 
 
+def _stop_sniffer(sniffer: Any) -> None:
+    """Beendet das Mitlesen sicher (kein hängender Thread, kein offenes Npcap-Handle); Fehler nur protokollieren."""
+    if sniffer is None:
+        return
+    try:
+        if getattr(sniffer, "running", False):
+            sniffer.stop(join=False)
+    except AssertionError:
+        raise
+    except Exception:  # noqa: BLE001 – Scapy meldet z. B. „Not running“, wenn es gerade selbst endete
+        log.debug("Scapy: Mitlesen ließ sich nicht anhalten", exc_info=True)
+    try:
+        sniffer.join(timeout=_STOP_JOIN_S)
+    except AssertionError:
+        raise
+    except Exception:  # noqa: BLE001 – join() wirft den Fehler des Mitlese-Threads erneut
+        log.debug("Scapy: Mitlesen endete mit Fehler", exc_info=True)
+
+
+def _wait_started(sniffer: Any, started: threading.Event) -> bool:
+    """Wartet höchstens _SNIFF_START_S auf den Start des Mitlesens; früher zurück, wenn es schon gescheitert ist."""
+    deadline = time.monotonic() + _SNIFF_START_S
+    while not started.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or getattr(sniffer, "exception", None) is not None:
+            return started.is_set()
+        started.wait(min(0.05, remaining))
+    return True
+
+
+def _match_replies(packets: Any, arp_cls: Any, asked: set[str], own_ip: str | None) -> dict[str, str]:
+    """Ordnet mitgelesene Pakete zu: nur ARP-Antworten (is-at) gefragter Adressen an uns; erste Antwort je IP gewinnt."""
+    replies: dict[str, str] = {}
+    for packet in packets or []:
+        layer = packet.getlayer(arp_cls)
+        if layer is None or getattr(layer, "op", None) != 2:
+            continue
+        ip = str(getattr(layer, "psrc", ""))
+        if ip not in asked or ip in replies:
+            continue
+        if own_ip and str(getattr(layer, "pdst", "")) != own_ip:
+            continue  # Antwort an einen anderen Rechner (z. B. Broadcast-Antwort) – nicht unsere Frage
+        replies[ip] = str(layer.hwsrc)
+    return replies
+
+
 def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float, inter: float = 0.0) -> dict[str, str]:
     """Standard-Sender: ARP-Anfragen per Broadcast über Scapy/Npcap. Wirft ArpUnavailable bei jedem Mangel.
 
-    inter: Abstand zwischen zwei Paketen in Sekunden (1/rate_pps), damit der Block gleichmäßig verteilt
-    hinausgeht. Absender-IP und -MAC stehen ausdrücklich im Paket (Adapter des Scans) und kommen nicht aus
-    Scapys zwischengespeicherter Routentabelle.
+    Ablauf: Mitlesen (AsyncSniffer, nur ARP-Antworten, ohne Promiscuous Mode) öffnen und auf dessen Start
+    warten, dann den Block mit sendp senden, nach dem letzten Paket timeout (+ 0,3 s Npcap-Puffer) weiter
+    mitlesen, anhalten und die Antworten selbst zuordnen.
+
+    Warum nicht srp(): Auf der WLAN-Karte (Intel AX201, Npcap 1.89, Scapy 2.8.0, Windows 11) bekam srp() 0
+    Antworten, mit und ohne Promiscuous Mode. Dieselbe Anfrage per sendp, während ein vorher geöffnetes
+    Mitlesen lief, zeigte die eigene Anfrage und die Antwort des Routers (tools/arp_diagnose.py, 10.10.2026).
+    Npcap empfängt also; nur srp() ordnet nicht zu.
+
+    inter: Abstand zwischen zwei Paketen in Sekunden (1/rate_pps, höchstens 1 s), damit der Block gleichmäßig
+    verteilt hinausgeht. Absender-IP und -MAC stehen ausdrücklich im Paket (Adapter des Scans) und kommen nicht
+    aus Scapys zwischengespeicherter Routentabelle. Dauer eines Aufrufs: Sendedauer + timeout (≤ 2 s) + 0,3 s,
+    dazu Millisekunden für Start und Stopp – mit Blöcken ≤ 1 s bleibt der Abbruch zwischen Blöcken unter 5 s.
     """
     # Verzögerter Import: ohne Npcap muss das restliche Programm trotzdem starten.
     try:
-        from scapy.all import ARP, Ether, conf, srp
+        from scapy.all import ARP, AsyncSniffer, Ether, conf, sendp
     except Exception as exc:  # noqa: BLE001
         raise ArpUnavailable(f"Scapy oder Npcap konnte nicht geladen werden: {_short(exc)}") from exc
     if not ips:
@@ -188,30 +249,59 @@ def _scapy_sender(adapter: Adapter, ips: list[str], timeout_s: float, inter: flo
     if hwsrc:
         ether_fields["src"] = hwsrc
         arp_fields["hwsrc"] = hwsrc
+    asked = {str(ip) for ip in ips}
+    started = threading.Event()
+    given_up = threading.Event()
+    sniffer: Any = None
+    stopped = False
+
+    def _is_reply(packet: Any) -> bool:
+        layer = packet.getlayer(ARP)
+        return layer is not None and getattr(layer, "op", None) == 2
+
+    def on_started() -> None:
+        started.set()
+        if given_up.is_set():  # zu spät gestartet: sofort wieder anhalten, sonst liefe das Mitlesen ohne Ende
+            try:
+                sniffer.stop(join=False)
+            except Exception:  # noqa: BLE001 – läuft im Mitlese-Thread, dort nur protokollieren
+                log.debug("Scapy: verspätetes Mitlesen ließ sich nicht anhalten", exc_info=True)
+
     try:
-        # promisc=False: Viele Windows-WLAN-Treiber (z. B. Intel) nehmen im Promiscuous Mode keine an den eigenen
-        # Rechner gerichteten Antworten mehr an – dann kämen 0 Antworten zurück. Wir brauchen nur Antworten an uns.
-        answered, _unanswered = srp(
-            Ether(**ether_fields) / ARP(**arp_fields),
-            iface=iface,
-            timeout=timeout,
-            inter=gap,
-            promisc=False,
-            verbose=0,
-        )
-    except AssertionError:  # Programmierfehler bzw. Testsperre nicht als „nicht verfügbar“ tarnen
+        # promisc=False (Mitlesen und Senden): Viele Windows-WLAN-Treiber (z. B. Intel) nehmen im Promiscuous Mode
+        # keine an den eigenen Rechner gerichteten Antworten mehr an. sendp öffnet sonst ein eigenes Handle mit
+        # conf.sniff_promisc (True). Kein timeout an AsyncSniffer: Scapy 2.8 lehnt ihn ab – join() begrenzt.
+        # BPF-Filter nur unter Windows (Npcap übersetzt ihn); unter Linux ohne libpcap würde er das Mitlesen
+        # verhindern – dort filtert lfilter in Python, _match_replies prüft ohnehin Opcode, Absender und Ziel.
+        filtering: dict[str, Any] = {"filter": _REPLY_FILTER} if _is_windows() else {"lfilter": _is_reply}
+        sniffer = AsyncSniffer(iface=iface, promisc=False, store=True, started_callback=on_started, **filtering)
+        sniffer.start()
+        if not _wait_started(sniffer, started):
+            given_up.set()
+            cause = getattr(sniffer, "exception", None)
+            detail = f": {_short(cause)}" if cause is not None else f" (keine Rückmeldung nach {_SNIFF_START_S:g} s)"
+            raise ArpUnavailable(
+                f"Mitlesen auf „{adapter.name}“ startet nicht{detail}. "
+                "Läuft das Programm als Administrator und ist Npcap installiert?"
+            ) from cause
+        sendp(Ether(**ether_fields) / ARP(**arp_fields), iface=iface, inter=gap, promisc=False, verbose=0)
+        # wie srp: nach dem letzten Paket das Timeout lauschen; höchstens 2 s, damit der Abbruch < 5 s bleibt
+        sniffer.join(timeout=min(timeout + _LISTEN_GRACE_S, _MAX_TIMEOUT_S))
+        _stop_sniffer(sniffer)
+        stopped = True
+        packets = getattr(sniffer, "results", None)
+        if packets is None:
+            raise ArpUnavailable(f"Mitlesen auf „{adapter.name}“ ließ sich nicht rechtzeitig beenden.")
+    except (AssertionError, ArpUnavailable):  # Programmierfehler bzw. Testsperre nicht als „nicht verfügbar“ tarnen
         raise
     except Exception as exc:  # noqa: BLE001 – Npcap fehlt, keine Rechte, Schnittstelle weg …
         raise ArpUnavailable(
             f"ARP-Anfrage nicht möglich: {_short(exc)}. Läuft das Programm als Administrator und ist Npcap installiert?"
         ) from exc
-    replies: dict[str, str] = {}
-    for _sent, received in answered:
-        layer = received.getlayer(ARP)
-        if layer is None:
-            continue
-        replies[str(layer.psrc)] = str(layer.hwsrc)
-    return replies
+    finally:
+        if not stopped:
+            _stop_sniffer(sniffer)  # immer, auch bei Fehlern in sendp – aber nie zweimal warten
+    return _match_replies(packets, ARP, asked, adapter.ipv4)
 
 
 # --- ARP-Scan ----------------------------------------------------------------
@@ -236,7 +326,7 @@ def arp_scan(ctx: ScanContext, adapter: Adapter, hosts: list[str], sender: ArpSe
     Wiederholt nicht antwortende Adressen settings.arp_retries mal (mit kürzerem Timeout).
     Rückgabe {ip: mac normalisiert}.
 
-    Drosselung: Der Standard-Sender schickt jeden Block mit dem Paketabstand 1/rate_pps (srp inter) – so
+    Drosselung: Der Standard-Sender schickt jeden Block mit dem Paketabstand 1/rate_pps (sendp inter) – so
     gehen nie mehr als rate_pps Anfragen je Sekunde hinaus, auch nicht stoßweise. Zusätzlich dauert jeder
     Block mindestens len(block)/rate_pps Sekunden (gilt auch für eingesetzte Sender). Der Token-Bucket
     ctx.rate würde den gleichmäßig verteilten Block ein zweites Mal ausbremsen und bleibt Ping und TCP vorbehalten.

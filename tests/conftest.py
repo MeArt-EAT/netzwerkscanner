@@ -150,8 +150,10 @@ def _install_lan_lock() -> None:
         import scapy.all as scapy_all
         import scapy.sendrecv as scapy_sendrecv
 
+        # AsyncSniffer: Der ARP-Sender liest mit, bevor er sendet – auch echtes Mitlesen ist im Test tabu.
+        scapy_names = ("srp", "srp1", "sr", "sr1", "send", "sendp", "sendpfast", "sniff", "AsyncSniffer", "srloop", "srploop", "arping")
         for mod in (scapy_all, scapy_sendrecv):
-            for fn in ("srp", "srp1", "sr", "sr1", "send", "sendp", "sendpfast", "sniff", "srloop", "srploop", "arping"):
+            for fn in scapy_names:
                 if hasattr(mod, fn):
                     setattr(mod, fn, _scapy_forbidden)
         try:
