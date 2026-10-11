@@ -5,25 +5,25 @@ als Einstieg. Den alten Chatverlauf braucht es nicht.
 
 ## 1. Stand
 
-- **Stufe 1 ist fertig** als Tag `v1.0-stufe1-rc3`, Branch `main`.
-  - 997 Tests grün, 1 übersprungen.
+- **Stufe 1 ist fertig** als Tag `v1.0-stufe1` (11.10.2026, = rc4), Branch `main`.
+  - 1013 Tests grün, 1 übersprungen.
   - GitHub Actions testet bei jedem Push auf Windows und Linux.
 - **Abnahme im Heimnetz läuft.** Die Scans waren erfolgreich: 16–20 Geräte, etwa 31 s inklusive Port-Scan.
 - **Verlauf der Testversionen:**
   - rc1: Prüfrunde mit 26 behobenen Befunden
   - rc2: frei nutzbar außer Schule
-  - rc3: ARP über WLAN korrigiert
+  - rc3: Geräte ohne Ping-Antwort über den ARP-Cache (ARP selbst über WLAN noch 0)
+  - rc4: ARP über WLAN ohne srp() – getrennt mitlesen und senden; im Heimnetz bestätigt
+    (10./11.10.2026: „ARP-Scan: 21 von 253“, 20 Geräte, 32–35 s mit Port-Scan)
 
-## 2. Offen, bevor der Tag `v1.0-stufe1` gesetzt wird
+## 2. Stand der Abnahme Stufe 1
 
-1. **ARP-Korrektur aus rc3 im Heimnetz bestätigen.**
-   - Bisher lief der Server noch mit dem alten Stand (Start 17:21 Uhr, Korrektur 17:57 Uhr). Alle Scans meldeten „ARP-Scan: 0 von 253“.
-   - Ablauf: Server-Fenster mit Strg+C schließen, `start.bat` neu starten, scannen.
-   - Gutes Ergebnis: Im Scan-Protokoll steht „ARP-Scan: X von 253“ mit X > 0, und bei den Geräten taucht der Fundweg „arp“ auf.
-   - Kommt wieder 0, greift die Ersatzsuche: Meldung „nur über den ARP-Cache gefunden“ plus eine Warnung. Dann weiter untersuchen (Ursache vermutlich der WLAN-Treiber, Abschnitt 6).
+1. **ARP über WLAN: erledigt** (rc4). Ursache laut `tools/arp_diagnose.py`: Scapys `srp()` ordnete die
+   Antworten auf der Intel-WLAN-Karte nicht zu, obwohl Npcap sie empfing. Jetzt: Mitlesen (AsyncSniffer, nur
+   ARP-Antworten) vor `sendp`, eigene Zuordnung.
 2. **Export-Test:** zurückgestellt. Der Nutzer testet ihn, wenn er gebraucht wird.
-3. **Übrige Punkte** der [Abnahme-Checkliste](ABNAHME_STUFE1.md), z. B. die Tests mit dem Hotspot.
-4. **Danach** `git tag -a v1.0-stufe1` setzen und pushen.
+3. **Noch offen:** übrige Punkte der [Abnahme-Checkliste](ABNAHME_STUFE1.md), z. B. die Tests mit dem Hotspot.
+   Der Tag `v1.0-stufe1` ist trotzdem gesetzt (Entscheidung 11.10.2026); Befunde daraus kommen als 1.0.x.
 
 ## 3. Feste Entscheidungen des Nutzers (nicht wieder aufrollen)
 
@@ -82,10 +82,12 @@ Prognose Stufe 2: 2–2½ h, etwa 10 % des Fensters.
 
 ## 6. Bekannte Grenzen und Beobachtungen
 
-- **ARP über WLAN:** Bis rc2 kam keine einzige Antwort. rc3 setzt `promisc=False`, das ist noch unbestätigt. Hilft das nicht, sind die nächsten Kandidaten:
-  - der Absender im Paket (`iface.mac` gegenüber der aktuellen WLAN-MAC)
-  - der Npcap-Treiber auf der Intel-Karte
-  - Prüfen nur lesend bzw. über einen Diagnoselauf, den der Nutzer selbst startet.
+- **ARP über WLAN:** gelöst in rc4 (siehe Abschnitt 2). Der Absender im Paket war korrekt, die Filtertreiber
+  (Shrew Soft, VirtualBox, AVM VPN) waren unschuldig. Diagnose bei künftigen Problemen: `tools/arp_diagnose.py`
+  (startet nur der Nutzer; sendet nur an den eigenen Router, sperrt sich im Schul-Hotspot).
+- **Git im Dropbox-Ordner:** Dropbox markiert Ordner als Cloud-Platzhalter; `git checkout`/`merge` in einem
+  Arbeitsordner brechen dann ab („cannot create directory at 'netscan'“). Kein `git checkout` im Projektordner;
+  Stufe 2 läuft aus `.claude\worktrees\stufe-2\start.bat`.
 - **Einordnung „unbekannt“** bei mehreren Smart-Home- und Solar-Geräten: FN-LINK „MSA-…“, Smart Innovation „S380HB“, Quectel „marstek“, Viessmann. Die IoT-Herstellertabelle in `netscan/net/classify.py` ließe sich ergänzen.
 - **Fritz-Repeater** melden eine private MAC und werden als Switch eingeordnet. Das ist vertretbar.
 - **Eigen-Scan ignoriert die Firewall:** Den eigenen PC (`is_self`) scannt der Scanner von sich selbst aus. Lokale
